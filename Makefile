@@ -6,6 +6,7 @@ INSTALL_DIR := /usr/local/bin
 CONFIG_DIR := /usr/local/etc
 SERVICE_DIR := /etc/systemd/system
 STATE_DIR := /var/tmp
+MRTG_WORK_DIR := /var/www/html/mrtg
 USER := monitoring
 GROUP := monitoring
 
@@ -55,12 +56,12 @@ install: check-root
 	id -u $(USER) >/dev/null 2>&1 || /usr/sbin/useradd -r -s /bin/bash -d /var/lib/apmonitor -m $(USER)
 
 	@echo "==> Adding monitoring user to www-data group..."
-	usermod -a -G www-data $(USER)
+	/usr/sbin/usermod -a -G www-data $(USER)
 
-	@echo "==> Creating MRTG working directory..."
+	@echo "==> Creating MRTG working directory $(MRTG_WORK_DIR)..."
 	mkdir -p $(MRTG_WORK_DIR)
 	chown mrtg:www-data $(MRTG_WORK_DIR)
-	chmod 771 $(MRTG_WORK_DIR)
+	chmod 775 $(MRTG_WORK_DIR)
 
 	@echo "==> Installing APMonitor script..."
 	install -m 755 APMonitor.py $(INSTALL_DIR)/APMonitor.py
