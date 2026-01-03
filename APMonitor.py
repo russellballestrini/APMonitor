@@ -3,7 +3,7 @@
 APMonitor - On-Premises Network Resource Availability Monitor
 """
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -29,6 +29,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import traceback
 from typing import Any, Dict, List, Optional, Tuple, Union
+import rrdtool
 
 # NB: check_quic_url() already has aioquic defined as a function local import so you don't have to lug it around if you don't need it
 
@@ -49,6 +50,7 @@ STATE_LOCK: threading.Lock = threading.Lock()
 DEFAULT_CHECK_EVERY_N_SECS: int = 60
 DEFAULT_NOTIFY_EVERY_N_SECS: int = 600
 DEFAULT_AFTER_EVERY_N_NOTIFICATIONS: int = 1
+RRD_ENABLED: bool = False
 
 # Global thread-local storage
 thread_local: threading.local = threading.local()
@@ -1586,7 +1588,11 @@ def calc_config_checksum(resource: Dict[str, Any]) -> str:
     return hashlib.sha256(resource_json.encode()).hexdigest()
 
 
-def is_check_due(resource: Dict[str, Any], prev_last_checked: Optional[str]) -> Tuple[bool, Union[float, bool]]:
+def is_check_due(
+        resource: Dict[str, Any],
+        prev_last_checked: Optional[str],
+        check_every_n_secs: int,
+    ) -> Tuple[bool, Union[float, bool]]:
     """Determine if a resource check is due.
 
     Args:
@@ -1597,9 +1603,6 @@ def is_check_due(resource: Dict[str, Any], prev_last_checked: Optional[str]) -> 
         tuple: (should_check: bool, seconds_since_check: float or False)
     """
     prefix = getattr(thread_local, 'prefix', '')
-
-    # Get check interval
-    check_every_n_secs = resource.get('check_every_n_secs', DEFAULT_CHECK_EVERY_N_SECS)
 
     # No previous check - first check
     if not prev_last_checked:
@@ -1709,6 +1712,140 @@ def is_heartbeat_due(
         return True, None
 
 
+def get_rrd_path(monitor_name: str) -> str:
+    """Generate filesystem-safe RRD file path for a monitor.
+
+    Args:
+        monitor_name: Name of the monitor
+
+    Returns:
+        str: Full path to RRD file
+    """
+    # Sanitize monitor name for filesystem (replace unsafe chars with underscore)
+    safe_name = re.sub(r'[^\w\-.]', '_', monitor_name)
+
+    # Use statefile directory, append .rrd/{monitor_name}-availability.rrd
+    base_path = Path(STATEFILE)
+    rrd_dir = base_path.parent / (base_path.stem + '.rrd')
+
+    return str(rrd_dir / f"{safe_name}-availability.rrd")
+
+
+def create_rrd(rrd_path: str, step_secs: int) -> None:
+    """Create RRD file with MRTG-compatible retention policy.
+
+    Args:
+        rrd_path: Full path to RRD file to create
+        step_secs: Update interval in seconds (from check_every_n_secs)
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Ensure RRD directory exists
+    os.makedirs(os.path.dirname(rrd_path), exist_ok=True)
+
+    # Calculate heartbeat (2x step allows one missed update)
+    heartbeat = step_secs * 2
+
+    # Data sources
+    data_sources = [
+        f'DS:response_time:GAUGE:{heartbeat}:0:U',  # Response time in ms (0 to unlimited)
+        f'DS:is_up:GAUGE:{heartbeat}:0:1',  # Up/down status (0 or 1)
+    ]
+
+    # Generate RRAs for this step interval
+    rras = create_rrd_rras(step_secs)
+
+    # Create RRD
+    try:
+        rrdtool.create(
+            rrd_path,
+            '--step', str(step_secs),
+            '--start', str(int(time.time()) - step_secs),
+            *data_sources,
+            *rras
+        )
+        if VERBOSE:
+            print(f"{prefix}Created RRD file: {rrd_path} (step={step_secs}s)")
+    except rrdtool.OperationalError as e:
+        print(f"{prefix}Failed to create RRD file '{rrd_path}': {e}", file=sys.stderr)
+
+
+def create_rrd_rras(step_secs: int) -> List[str]:
+    """Generate RRAs that maintain MRTG-compatible time ranges.
+
+    Time ranges maintained:
+    - High-resolution recent: 1 day at native resolution
+    - Short-term: ~2 days at 5-minute intervals
+    - Medium-term: ~12.5 days at 30-minute intervals
+    - Long-term: ~50 days at 2-hour intervals
+    - Historical: ~2 years at 1-day intervals
+
+    Args:
+        step_secs: RRD step interval in seconds
+
+    Returns:
+        List of RRA definition strings
+    """
+    # Calculate consolidation factors to achieve target intervals
+    steps_per_5min = max(1, 300 // step_secs)
+    steps_per_30min = max(1, 1800 // step_secs)
+    steps_per_2hour = max(1, 7200 // step_secs)
+    steps_per_day = max(1, 86400 // step_secs)
+
+    # Calculate rows to maintain time ranges
+    rows_1day_native = 86400 // step_secs  # 1 day at native resolution
+    rows_2days_5min = 600  # MRTG standard
+    rows_12days_30min = 600  # MRTG standard
+    rows_50days_2hour = 600  # MRTG standard
+    rows_2years_daily = 732  # MRTG standard
+
+    return [
+        # High-resolution recent data
+        f'RRA:AVERAGE:0.5:1:{rows_1day_native}',
+        f'RRA:MIN:0.5:1:{rows_1day_native}',
+        f'RRA:MAX:0.5:1:{rows_1day_native}',
+
+        # MRTG-compatible intervals
+        f'RRA:AVERAGE:0.5:{steps_per_5min}:{rows_2days_5min}',
+        f'RRA:AVERAGE:0.5:{steps_per_30min}:{rows_12days_30min}',
+        f'RRA:AVERAGE:0.5:{steps_per_2hour}:{rows_50days_2hour}',
+        f'RRA:AVERAGE:0.5:{steps_per_day}:{rows_2years_daily}',
+
+        # Min/Max for MRTG intervals
+        f'RRA:MIN:0.5:{steps_per_5min}:{rows_2days_5min}',
+        f'RRA:MAX:0.5:{steps_per_5min}:{rows_2days_5min}',
+    ]
+
+
+def update_rrd(rrd_path: str, timestamp: datetime, response_time_ms: Optional[int], is_up: bool) -> None:
+    """Update RRD file with latest metrics.
+
+    Args:
+        rrd_path: Full path to RRD file
+        timestamp: Timestamp of the measurement
+        response_time_ms: Response time in milliseconds (or None if check failed)
+        is_up: Whether resource is up (True) or down (False)
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Convert to epoch timestamp
+    epoch = int(timestamp.timestamp())
+
+    # Format values (use 'U' for unknown if response_time is None)
+    response_val = str(response_time_ms) if response_time_ms is not None else 'U'
+    is_up_val = '1' if is_up else '0'
+
+    try:
+        rrdtool.update(
+            rrd_path,
+            f'{epoch}:{response_val}:{is_up_val}'
+        )
+        if VERBOSE > 1:
+            print(f"{prefix}Updated RRD: {rrd_path} @ {epoch} response={response_val}ms is_up={is_up_val}")
+    except rrdtool.OperationalError as e:
+        print(f"{prefix}Failed to update RRD file '{rrd_path}': {e}", file=sys.stderr)
+
+
 def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -> None:
     """Check resource and ping heartbeat if up."""
 
@@ -1731,7 +1868,8 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
     config_changed = prev_config_checksum and prev_config_checksum != resource_checksum
 
     # Determine if we should check this resource
-    should_check, seconds_since_check = is_check_due(resource, prev_last_checked)
+    check_every_n_secs = resource.get('check_every_n_secs', DEFAULT_CHECK_EVERY_N_SECS)
+    should_check, seconds_since_check = is_check_due(resource, prev_last_checked, check_every_n_secs)
 
     # Determine if heartbeat is due (adjust time by last response time to account for check duration)
     from datetime import timedelta
@@ -1886,6 +2024,14 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
             last_notified = prev_last_notified
             notified_count = prev_notified_count
 
+    # Update RRD database for MRTG
+    if RRD_ENABLED:
+        rrd_path = get_rrd_path(resource['name'])
+        print(f"{prefix}updating RRD database for {rrd_path}")
+        if not os.path.exists(rrd_path):
+            create_rrd(rrd_path, check_every_n_secs)
+        update_rrd(rrd_path, now, last_response_time_ms, is_up)
+
     # Update state for this resource
     update_state({
         resource['name']: {
@@ -1960,8 +2106,77 @@ def create_pid_file_or_exit_on_unix(config_path: str) -> Optional[str]:
     return lockfile_path
 
 
+def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path: str) -> None:
+    """Generate MRTG configuration from APMonitor config with atomic file rotation.
+
+    Args:
+        config: APMonitor configuration dict
+        work_dir: MRTG working directory (where graphs will be generated)
+        mrtg_config_path: Path to MRTG config file (will use .new/.old rotation)
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Build MRTG config content
+    mrtg_lines = [
+        "# MRTG Configuration - Generated by APMonitor",
+        f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        f"WorkDir: {work_dir}",
+        "Options[_]: growright,bits",
+        "WriteExpires: Yes",
+        "",
+    ]
+
+    for resource in config['monitors']:
+        safe_name = re.sub(r'[^\w\-.]', '_', resource['name'])
+        rrd_path = get_rrd_path(resource['name'])
+
+        # MRTG target uses rrdtool fetch to get latest data
+        # Returns response_time:is_up values
+        mrtg_lines.extend([
+            f"######################################################################",
+            f"# {resource['name']} ({resource['type']})",
+            f"",
+            f"Target[{safe_name}]: `rrdtool fetch {rrd_path} AVERAGE -s -300 -e now | tail -2 | head -1 | awk '{{print $2\":\"$3}}'`",
+            f"MaxBytes[{safe_name}]: 100000",  # Max response time in ms
+            f"Title[{safe_name}]: {resource['name']} - Availability",
+            f"PageTop[{safe_name}]: <h1>{resource['name']} ({resource['address']})</h1>",
+            f"Options[{safe_name}]: gauge,nopercent,growright",
+            f"YLegend[{safe_name}]: Response Time (ms)",
+            f"ShortLegend[{safe_name}]: ms",
+            f"Legend1[{safe_name}]: Response Time",
+            f"Legend2[{safe_name}]: Availability",
+            f"LegendI[{safe_name}]: Response:",
+            f"LegendO[{safe_name}]: Up:",
+            f"",
+        ])
+
+    config_content = "\n".join(mrtg_lines)
+
+    # Write to .new file
+    new_path = Path(mrtg_config_path + '.new')
+    old_path = Path(mrtg_config_path + '.old')
+    config_path = Path(mrtg_config_path)
+
+    try:
+        # Write new config
+        with open(new_path, 'w') as f:
+            f.write(config_content)
+
+        # Atomic rotation: current -> .old, .new -> current
+        if config_path.exists():
+            os.replace(config_path, old_path)
+        os.replace(new_path, config_path)
+
+        if VERBOSE:
+            print(f"{prefix}Generated MRTG config: {mrtg_config_path}")
+
+    except Exception as e:
+        print(f"{prefix}Failed to generate MRTG config '{mrtg_config_path}': {e}", file=sys.stderr)
+
+
 def main() -> None:
-    global VERBOSE, MAX_THREADS, STATEFILE, STATE, MAX_RETRIES, MAX_TRY_SECS, DEFAULT_CHECK_EVERY_N_SECS, DEFAULT_NOTIFY_EVERY_N_SECS, DEFAULT_AFTER_EVERY_N_NOTIFICATIONS
+    global VERBOSE, MAX_THREADS, STATEFILE, STATE, MAX_RETRIES, MAX_TRY_SECS, DEFAULT_CHECK_EVERY_N_SECS, DEFAULT_NOTIFY_EVERY_N_SECS, DEFAULT_AFTER_EVERY_N_NOTIFICATIONS, RRD_ENABLED
 
     parser = argparse.ArgumentParser(description='Network resource availability monitor')
     parser.add_argument('config', help='Path to configuration file (JSON or YAML)')
@@ -1970,6 +2185,7 @@ def main() -> None:
     parser.add_argument('-s', '--statefile', default=get_default_statefile(), help=f'Path to state file (default: platform-dependent, see docs)')
     parser.add_argument('--test-webhooks', action='store_true', help='Test webhook notifications and exit')
     parser.add_argument('--test-emails', action='store_true', help='Test email notifications and exit')
+    parser.add_argument('--generate-mrtg-config', metavar='WORKDIR', nargs='?', const='/var/www/html/mrtg', help='Generate MRTG config file and exit (default workdir: /var/www/html/mrtg)')
     args = parser.parse_args()
 
     VERBOSE = args.verbose
@@ -2022,6 +2238,15 @@ def main() -> None:
                 notify_resource_outage_with_email(email_entry, config['site']['name'], test_error, config['site'], 'outage')
             print("Email test complete")
             sys.exit(0)
+
+        # Generate MRTG config mode
+        if args.generate_mrtg_config is not None:
+            work_dir = args.generate_mrtg_config
+            mrtg_config_path = str(Path(STATEFILE).with_suffix('.mrtg.cfg'))
+            generate_mrtg_config(config, work_dir, mrtg_config_path)
+            print(f"MRTG config generated at: {mrtg_config_path}")
+            print(f"MRTG working directory: {work_dir}")
+            RRD_ENABLED = True
 
         if args.threads == 1 and 'max_threads' in config['site']:  # only if not overridden by command line
             MAX_THREADS = config['site']['max_threads']

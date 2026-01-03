@@ -5,11 +5,11 @@
 Synopsis:
 
 On-prem/LAN availability monitoring with realtime guarantees & decaying alert pacing. 
-Multithreaded high speed availability checking for PING, QUIC & HTTP/S resources incl. SSL/TLS cert. pinning.
-Integrates with Site24x7 heartbeat monitoring for failover alerting + Slack & Pushover webhooks.
+Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S resources incl. SSL/TLS cert. pinning.
+Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
 Thread safe, reentrant, easily modifiable.
 
-# Release 1.2.0 (17-Dec-25): tpython + tcp/udp
+# Release 1.2.0 (17-Dec-25): tpython + tcp/udp improvements
 - Updated telemetry to show we know how long ago and for how long the last run was
 - Implemented tpython
 - Cleaned up 'Expect:' that tpython #SWE picked up

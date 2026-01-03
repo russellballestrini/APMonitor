@@ -162,6 +162,55 @@ To see how the alarm pacing will accelerate then subsequently delay notification
 
 Note that alarm pacing can be set at a global level in the `site:` config, and is overridden when set at a per monitored resource level in the `monitors:` section of the config.
 
+# MRTG Integration for Performance Graphing
+
+APMonitor can generate MRTG configuration files for visualizing resource availability and response times using RRDTool databases.
+
+## Generating MRTG Configuration
+```bash
+./APMonitor.py -s /tmp/statefile.json config.yaml --generate-mrtg-config [WORKDIR]
+```
+
+**Parameters:**
+- `--generate-mrtg-config` - Generates MRTG config and exits. Enables RRD data collection for subsequent monitoring runs.
+- `WORKDIR` (optional) - Directory where MRTG will generate graphs. Default: `/var/www/html/mrtg`
+
+**Output:**
+- MRTG config file: Path derived from statefile by replacing `.json` with `.mrtg.cfg`
+  - Example: `/tmp/statefile.json` → `/tmp/statefile.mrtg.cfg`
+- RRD files: Created in `{statefile-dir}/{statefile-name}.rrd/` directory
+  - Example: `/tmp/statefile.json` → `/tmp/statefile.rrd/monitor-name-availability.rrd`
+
+**Examples:**
+
+Using default working directory:
+```bash
+./APMonitor.py -s /tmp/statefile.json config.yaml --generate-mrtg-config
+# Output: MRTG config generated at: /tmp/statefile.mrtg.cfg
+#         MRTG working directory: /var/www/html/mrtg
+```
+
+Using custom working directory:
+```bash
+./APMonitor.py -s /tmp/statefile.json config.yaml --generate-mrtg-config /var/www/html/graphs
+# Output: MRTG config generated at: /tmp/statefile.mrtg.cfg
+#         MRTG working directory: /var/www/html/graphs
+```
+
+## RRD Data Sources
+
+Each RRD file tracks two metrics:
+
+- **`response_time`** (GAUGE): Response time in milliseconds
+  - Range: 0 to unlimited
+  - Value: 'U' (unknown) when check fails
+  
+- **`is_up`** (GAUGE): Availability status
+  - 1 = service up
+  - 0 = service down
+
+**Note:** RRD data collection is disabled by default. Run `--generate-mrtg-config` once to enable RRD tracking, then continue normal monitoring runs to collect data.
+
 # `APMonitor.py` YAML/JSON Site Configuration Options
 
 APMonitor uses a YAML or JSON configuration file to define the site being monitored and the resources to check. The configuration consists of two main sections: site-level settings that apply globally, and per-monitor settings that define individual resources to check.
@@ -675,12 +724,14 @@ The configuration validator enforces these rules:
 
 Install system-wide for production use:
 ```
-sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic
+sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool
+sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
 ```
 
 Or on Debian 12+ systems:
 ```
-sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic
+sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool
+sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
 ```
 
 **Note**: The `aioquic` package is required for QUIC/HTTP3 monitoring support. If you don't plan to use `type: quic` monitors, you can omit this dependency.
@@ -1236,7 +1287,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.0
+Software: APMonitor 1.2.1
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```

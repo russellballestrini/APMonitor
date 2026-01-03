@@ -45,14 +45,22 @@ check-sudo:
 install: check-root
 	@echo "==> Installing system dependencies..."
 	apt update
-	apt install -y python3 python3-pip
+	apt install -y python3 python3-pip python3-rrdtool librrd-dev python3-dev mrtg rrdtool
 
 	@echo "==> Installing Python dependencies globally..."
-	$(PIP) install --break-system-packages PyYAML requests pyOpenSSL urllib3 || \
-	$(PIP) install PyYAML requests pyOpenSSL urllib3
+	$(PIP) install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool || \
+	$(PIP) install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
 
 	@echo "==> Creating monitoring user..."
 	id -u $(USER) >/dev/null 2>&1 || /usr/sbin/useradd -r -s /bin/bash -d /var/lib/apmonitor -m $(USER)
+
+	@echo "==> Adding monitoring user to www-data group..."
+	usermod -a -G www-data $(USER)
+
+	@echo "==> Creating MRTG working directory..."
+	mkdir -p $(MRTG_WORK_DIR)
+	chown mrtg:www-data $(MRTG_WORK_DIR)
+	chmod 771 $(MRTG_WORK_DIR)
 
 	@echo "==> Installing APMonitor script..."
 	install -m 755 APMonitor.py $(INSTALL_DIR)/APMonitor.py
@@ -75,7 +83,7 @@ install: check-root
 	@echo "" >> $(SERVICE_DIR)/apmonitor.service
 	@echo "[Service]" >> $(SERVICE_DIR)/apmonitor.service
 	@echo "Type=simple" >> $(SERVICE_DIR)/apmonitor.service
-	@echo "ExecStart=/bin/bash -c 'while true; do $(INSTALL_DIR)/APMonitor.py -vv -s $(STATE_DIR)/apmonitor-statefile.json $(CONFIG_DIR)/apmonitor-config.yaml; sleep 10; done'" >> $(SERVICE_DIR)/apmonitor.service
+	@echo "ExecStart=/bin/bash -c 'while true; do $(INSTALL_DIR)/APMonitor.py -vv -s $(STATE_DIR)/apmonitor-statefile.json $(CONFIG_DIR)/apmonitor-config.yaml --generate-mrtg-config; sleep 10; done'" >> $(SERVICE_DIR)/apmonitor.service
 	@echo "Restart=always" >> $(SERVICE_DIR)/apmonitor.service
 	@echo "RestartSec=10" >> $(SERVICE_DIR)/apmonitor.service
 	@echo "User=$(USER)" >> $(SERVICE_DIR)/apmonitor.service
@@ -113,6 +121,8 @@ uninstall: check-root
 	rm -f $(INSTALL_DIR)/APMonitor.py
 	rm -f $(CONFIG_DIR)/apmonitor-config.yaml
 	rm -f $(STATE_DIR)/apmonitor-statefile.json*
+	rm -f $(STATE_DIR)/apmonitor-statefile.mrtg.cfg*
+	rm -rf $(STATE_DIR)/apmonitor-statefile.rrd
 
 	@echo "==> Removing monitoring user..."
 	-/usr/sbin/userdel -r $(USER)
