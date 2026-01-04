@@ -162,9 +162,11 @@ To see how the alarm pacing will accelerate then subsequently delay notification
 
 Note that alarm pacing can be set at a global level in the `site:` config, and is overridden when set at a per monitored resource level in the `monitors:` section of the config.
 
-# MRTG Integration for Performance Graphing
+# MRTG Integration for Performance Graphing (EXPERIMENTAL IN V1.2.1)
 
 APMonitor can generate MRTG configuration files for visualizing resource availability and response times using RRDTool databases.
+
+**Note: MRTG, RRD, SNMP & librosa integration is highly experimental and will change. I am using RRDTool for keeping frequency domain/time domain data for now and need to do alot more to get MRTG working correctly. USE AT YOUR OWN PERIL! (It's highly recommended that you use version 1.2.0 instead).**
 
 ## Generating MRTG Configuration
 ```bash
@@ -210,6 +212,28 @@ Each RRD file tracks two metrics:
   - 0 = service down
 
 **Note:** RRD data collection is disabled by default. Run `--generate-mrtg-config` once to enable RRD tracking, then continue normal monitoring runs to collect data.
+
+## Example commands for working with RRD Files
+
+```
+# Run APMonitor with MRTG & RRD enabled
+./APMonitor.py -vv -s /var/tmp/apmonitor.json test2-apmonitor-config.yaml --generate-mrtg-config
+
+# Check when the RRD was created
+ls -la /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd
+
+# Dump RRD info to see its structure
+rrdtool info /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd | head -50
+
+# Check the last update timestamp
+rrdtool lastupdate /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd
+
+# Fetch the last 300 ms
+rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s end-300 -e now
+
+# Test the fetch command for one monitor
+rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s end-300 -e now 2>/dev/null | grep -v nan | tail -1 | awk '{if (NF>=3) print int($2+0) ":" int($3+0); else print "0:0"}' | grep -E '^[0-9]+:[0-9]+$' || echo '0:0'
+```
 
 # `APMonitor.py` YAML/JSON Site Configuration Options
 
@@ -724,13 +748,13 @@ The configuration validator enforces these rules:
 
 Install system-wide for production use:
 ```
-sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool
+sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl
 sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
 ```
 
 Or on Debian 12+ systems:
 ```
-sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool
+sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl
 sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
 ```
 

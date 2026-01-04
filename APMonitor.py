@@ -2027,7 +2027,8 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
     # Update RRD database for MRTG
     if RRD_ENABLED:
         rrd_path = get_rrd_path(resource['name'])
-        print(f"{prefix}updating RRD database for {rrd_path}")
+        if VERBOSE > 1:
+            print(f"{prefix}updating RRD database for {rrd_path} w/ {now}, {last_response_time_ms}, {is_up}")
         if not os.path.exists(rrd_path):
             create_rrd(rrd_path, check_every_n_secs)
         update_rrd(rrd_path, now, last_response_time_ms, is_up)
@@ -2122,6 +2123,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
         f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         f"WorkDir: {work_dir}",
+        "LogFormat: rrdtool",
         "Options[_]: growright,bits",
         "WriteExpires: Yes",
         "",
@@ -2131,14 +2133,14 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
         safe_name = re.sub(r'[^\w\-.]', '_', resource['name'])
         rrd_path = get_rrd_path(resource['name'])
 
-        # MRTG target uses rrdtool fetch to get latest data
-        # Returns response_time:is_up values
+        # MRTG with LogFormat: rrdtool reads RRD files directly
+        # Target points to the RRD file, data source names follow RRD DS names
         mrtg_lines.extend([
             f"######################################################################",
             f"# {resource['name']} ({resource['type']})",
             f"",
-            f"Target[{safe_name}]: `rrdtool fetch {rrd_path} AVERAGE -s -300 -e now | tail -2 | head -1 | awk '{{print $2\":\"$3}}'`",
-            f"MaxBytes[{safe_name}]: 100000",  # Max response time in ms
+            f"Target[{safe_name}]: response_time&is_up:{rrd_path}",
+            f"MaxBytes[{safe_name}]: 100000",
             f"Title[{safe_name}]: {resource['name']} - Availability",
             f"PageTop[{safe_name}]: <h1>{resource['name']} ({resource['address']})</h1>",
             f"Options[{safe_name}]: gauge,nopercent,growright",

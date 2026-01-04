@@ -46,7 +46,7 @@ check-sudo:
 install: check-root
 	@echo "==> Installing system dependencies..."
 	apt update
-	apt install -y python3 python3-pip python3-rrdtool librrd-dev python3-dev mrtg rrdtool
+	apt install -y python3 python3-pip python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl
 
 	@echo "==> Installing Python dependencies globally..."
 	$(PIP) install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool || \
