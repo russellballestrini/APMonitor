@@ -1,6 +1,6 @@
 <img src="images/APMonitor-logo.png" alt="APMonitor logo" width="128" height="128" style="vertical-align: text-bottom;">
 
-# `APMonitor.py` - An On-Premises Monitoring Tool with Alert Delivery Guarantees
+# `APMonitor.py` - A Hands-Off On-Premises Monitoring Tool with Alert Delivery Guarantees
 
 This is an on-prem monitoring tool written completely in very clear Python-only code (so you can modify it) and is designed to work on a LAN for on-prem availability monitoring of resources that aren't necesarilly connected to The Internet, and/or where the on-prem monitoring itself is also required to have availability guarantees.
 
@@ -140,9 +140,11 @@ programming. A workaround in the meantime is to make sure your number of threads
 resources - something that is not necessarily practical or required in most settings.
 
 
-# Recommended configuration for alarm notification pacing
+# Recommended configuration for 'Hands-Off' alarm notification pacing
 
-You might also want to consider alarm notification pacing, so that recently down resources generate more frequent messages, whilst long outages are notified less frequently. To enable:
+If you want to avoid the need to connect to the monitoring server to hush alarms as they happen and ensure you receive
+UP notifications as soon as things return to normal, you might also want to consider alarm notification pacing, so that
+recently down resources generate more frequent messages, whilst long outages are notified less frequently. To enable:
 
 - Set `notify_every_n_secs` to `3600` seconds (i.e., 1 hour), and
 - Set `after_every_n_notifications` to `8`,
