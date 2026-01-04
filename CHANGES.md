@@ -9,8 +9,11 @@ Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S 
 Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
 Thread safe, reentrant, easily modifiable.
 
-# Release 1.2.1 (???): ???
+# Release 1.2.1 (4-Jan-25): Storing Frequency Domain in RRD
 - Added support for RRD datafiles & MRTG config 
+- Started trying to get mrtg-rrd FastCGI working with APMonitor
+
+**NB: This is an experimental releaase**
 
 # Release 1.2.0 (17-Dec-25): tpython + tcp/udp improvements
 - Updated telemetry to show we know how long ago and for how long the last run was

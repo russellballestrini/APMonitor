@@ -166,7 +166,7 @@ Note that alarm pacing can be set at a global level in the `site:` config, and i
 
 APMonitor can generate MRTG configuration files for visualizing resource availability and response times using RRDTool databases.
 
-**Note: MRTG, RRD, mrtg-rrd, SNMP & librosa integration is highly experimental and will change. I am using RRDTool for keeping frequency domain/time domain data for now and need to do alot more to get MRTG working correctly. USE AT YOUR OWN PERIL! (It's highly recommended that you use [version 1.2.0 instead](https://github.com/CompSciFutures/APMonitor/releases/tag/1.2.0).**
+**Note: MRTG, RRD, mrtg-rrd, SNMP & librosa integration is highly experimental, a house of cards and will change. I am using RRDTool for keeping frequency domain/time domain data for now and need to do alot more to get MRTG working correctly. USE AT YOUR OWN PERIL! (It's highly recommended that you use [version 1.2.0 instead](https://github.com/CompSciFutures/APMonitor/releases/tag/1.2.0)).**
 
 ## Generating MRTG Configuration
 ```bash
