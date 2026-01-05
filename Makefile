@@ -7,19 +7,21 @@ CONFIG_DIR := /usr/local/etc
 SERVICE_DIR := /etc/systemd/system
 STATE_DIR := /var/tmp
 MRTG_WORK_DIR := /var/www/html/mrtg
+NGINX_CONF_DIR := /var/www/html
 USER := monitoring
 GROUP := monitoring
 
 # Detect if sudo is available, use it if not root, or fail
 SUDO := $(shell if [ "$$(id -u)" -eq 0 ]; then echo ""; elif command -v sudo >/dev/null 2>&1; then echo "sudo"; else echo "NOSUDO"; fi)
 
-.PHONY: help install uninstall enable start stop restart status logs test-config test-webhooks check-root check-sudo
+.PHONY: help install uninstall enable start stop restart status logs test-config test-webhooks installmrtg check-root check-sudo
 
 help:
 	@echo "APMonitor Installation Makefile"
 	@echo ""
 	@echo "Available targets:"
 	@echo "  install         - Install APMonitor (requires root)"
+	@echo "  installmrtg     - Install MRTG web interface on port 888 (requires root)"
 	@echo "  uninstall       - Remove APMonitor completely (requires root)"
 	@echo "  enable          - Enable and start systemd service (requires root)"
 	@echo "  start           - Start APMonitor service (requires root)"
@@ -109,13 +111,83 @@ install: check-root
 	@echo "  4. Check status:       make status"
 	@echo "  5. View logs:          make logs"
 
+installmrtg: check-root
+	@echo "==> Installing MRTG web interface dependencies..."
+	apt update
+	apt install -y fcgiwrap nginx librrds-perl
+
+	@echo "==> Checking if system nginx is already running..."
+	@if systemctl is-active --quiet nginx; then \
+		echo "Warning: System nginx service is already running"; \
+		echo "This will conflict with our standalone nginx on port 888"; \
+		echo "Stopping and disabling system nginx..."; \
+		systemctl stop nginx; \
+		systemctl disable nginx; \
+	fi
+
+	@echo "==> Installing mrtg-rrd.cgi.pl to $(MRTG_WORK_DIR)..."
+	mkdir -p $(MRTG_WORK_DIR)
+	install -m 755 mrtg-rrd.cgi.pl $(MRTG_WORK_DIR)/mrtg-rrd.cgi.pl
+
+	@echo "==> Installing nginx configuration..."
+	install -m 644 mrtg-nginx.conf $(NGINX_CONF_DIR)/mrtg-nginx.conf
+
+	@echo "==> Setting up fcgiwrap socket permissions..."
+	@if ! systemctl is-active --quiet fcgiwrap.service; then \
+		echo "Starting fcgiwrap service..."; \
+		systemctl start fcgiwrap.service; \
+		systemctl enable fcgiwrap.service; \
+	fi
+	chmod 777 /var/run/fcgiwrap.socket
+
+	@echo "==> Creating systemd service for MRTG nginx..."
+	@echo "[Unit]" > $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "Description=APMonitor MRTG Web Interface (nginx)" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "After=network.target fcgiwrap.service" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "Requires=fcgiwrap.service" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "[Service]" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "Type=forking" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "ExecStartPre=/usr/sbin/nginx -t -c $(NGINX_CONF_DIR)/mrtg-nginx.conf -p $(NGINX_CONF_DIR)" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "ExecStart=/usr/sbin/nginx -c $(NGINX_CONF_DIR)/mrtg-nginx.conf -p $(NGINX_CONF_DIR)" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "ExecReload=/usr/sbin/nginx -s reload -c $(NGINX_CONF_DIR)/mrtg-nginx.conf -p $(NGINX_CONF_DIR)" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "ExecStop=/usr/sbin/nginx -s stop -c $(NGINX_CONF_DIR)/mrtg-nginx.conf -p $(NGINX_CONF_DIR)" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "PrivateTmp=true" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "[Install]" >> $(SERVICE_DIR)/apmonitor-nginx.service
+	@echo "WantedBy=multi-user.target" >> $(SERVICE_DIR)/apmonitor-nginx.service
+
+	@echo "==> Reloading systemd..."
+	systemctl daemon-reload
+
+	@echo "==> Starting apmonitor-nginx service..."
+	systemctl enable apmonitor-nginx.service
+	systemctl start apmonitor-nginx.service
+
+	@echo ""
+	@echo "==> MRTG web interface installation complete!"
+	@echo ""
+	@echo "Access MRTG at: http://localhost:888/"
+	@echo "MRTG CGI at: http://localhost:888/mrtg-rrd/"
+	@echo ""
+	@echo "Service management:"
+	@echo "  Status:  systemctl status apmonitor-nginx"
+	@echo "  Stop:    systemctl stop apmonitor-nginx"
+	@echo "  Start:   systemctl start apmonitor-nginx"
+	@echo "  Restart: systemctl restart apmonitor-nginx"
+	@echo ""
+	@echo "Note: fcgiwrap socket is set to 777 permissions for compatibility"
+
 uninstall: check-root
-	@echo "==> Stopping and disabling service..."
+	@echo "==> Stopping and disabling services..."
 	-systemctl stop apmonitor.service
 	-systemctl disable apmonitor.service
+	-systemctl stop apmonitor-nginx.service
+	-systemctl disable apmonitor-nginx.service
 
-	@echo "==> Removing service file..."
+	@echo "==> Removing service files..."
 	rm -f $(SERVICE_DIR)/apmonitor.service
+	rm -f $(SERVICE_DIR)/apmonitor-nginx.service
 	systemctl daemon-reload
 
 	@echo "==> Removing files..."
@@ -124,6 +196,8 @@ uninstall: check-root
 	rm -f $(STATE_DIR)/apmonitor-statefile.json*
 	rm -f $(STATE_DIR)/apmonitor-statefile.mrtg.cfg*
 	rm -rf $(STATE_DIR)/apmonitor-statefile.rrd
+	rm -f $(NGINX_CONF_DIR)/mrtg-nginx.conf
+	rm -f $(MRTG_WORK_DIR)/mrtg-rrd.cgi.pl
 
 	@echo "==> Removing monitoring user..."
 	-/usr/sbin/userdel -r $(USER)

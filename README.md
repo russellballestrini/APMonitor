@@ -237,6 +237,8 @@ rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s en
 rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s end-300 -e now 2>/dev/null | grep -v nan | tail -1 | awk '{if (NF>=3) print int($2+0) ":" int($3+0); else print "0:0"}' | grep -E '^[0-9]+:[0-9]+$' || echo '0:0'
 ```
 
+Refer to [FSF Directory](https://directory.fsf.org/wiki/Mrtg-rrd) and WaybackMachine page on [mrtg-rrd.cgi](https://web.archive.org/web/20081228131907/http://www.fi.muni.cz:80/~kas/mrtg-rrd/cvsweb.cgi/FAQ?rev=HEAD) for more information.
+
 # `APMonitor.py` YAML/JSON Site Configuration Options
 
 APMonitor uses a YAML or JSON configuration file to define the site being monitored and the resources to check. The configuration consists of two main sections: site-level settings that apply globally, and per-monitor settings that define individual resources to check.
@@ -1313,7 +1315,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.1
+Software: APMonitor 1.2.2
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```
