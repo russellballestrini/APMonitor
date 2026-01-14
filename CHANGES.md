@@ -9,6 +9,15 @@ Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S 
 Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
 Thread safe, reentrant, easily modifiable.
 
+# Release 1.2.3 (14-Jan-26): Better MRTG Support
+- Fixed case sensitivity in MRTG target names
+- Fixed MRTG HTML index to overcome caching issues
+- Fixed nginx config so mrtg-rrd.cgi.pl source code isn't available
+- Made mrtg-rrd.cgi.pl support multiple (possibly nonexistant) config files
+- Make APMonitor.py add the config file to mrtg-rrd.cgi.pl when doing --generate-mrtg-config
+- Got mrtg-rrd.cgi.pl to properly support multiple config files and hands off install thereof
+- Updated Makefile to document 'make installmrtg'
+
 # Release 1.2.2 (5-Jan-26): Added mrtg-rrd support
 - Added basic NGINX + MRTG-RRD support. Still clunky.
 

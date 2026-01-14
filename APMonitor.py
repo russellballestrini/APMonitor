@@ -44,7 +44,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -2218,14 +2218,65 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
         print(f"{prefix}Failed to generate MRTG config '{mrtg_config_path}': {e}", file=sys.stderr)
 
 
-def generate_mrtg_index(config: Dict[str, Any], index_path: str) -> None:
-    """Generate index.html with 3-column grid of monitor charts using atomic file rotation.
+def generate_mrtg_index(all_config_files: List[str], index_path: str) -> None:
+    """Generate index.html with 3-column grid of monitor charts from all MRTG configs using atomic file rotation.
 
     Args:
-        config: APMonitor configuration dict
+        all_config_files: List of paths to MRTG config files
         index_path: Full path to index.html file to create (will use .new/.old rotation)
     """
     prefix = getattr(thread_local, 'prefix', '')
+
+    # Collect all monitors from all config files
+    all_monitors = []
+    site_name = "Network Monitoring"  # Default site name
+
+    for config_file in all_config_files:
+        if not os.path.exists(config_file):
+            if VERBOSE:
+                print(f"{prefix}Warning: Config file not found: {config_file}, skipping")
+            continue
+
+        try:
+            # Parse MRTG config to extract targets
+            with open(config_file, 'r') as f:
+                content = f.read()
+
+            # Extract site name from first config file (if present in comments)
+            if not all_monitors:  # Only from first file
+                site_match = re.search(r'#.*Site:\s*(.+)', content)
+                if site_match:
+                    site_name = site_match.group(1).strip()
+
+            # Find all Target[name]: entries
+            target_pattern = r'Target\[([^\]]+)\]:'
+            targets = re.findall(target_pattern, content)
+
+            for target_name in targets:
+                # Extract metadata for this target
+                title_match = re.search(rf'Title\[{re.escape(target_name)}\]:\s*(.+)', content)
+                pagetop_match = re.search(rf'PageTop\[{re.escape(target_name)}\]:\s*<h1>([^<]+)\s*\(([^)]+)\)</h1>', content)
+
+                monitor_info = {
+                    'name': target_name,
+                    'title': title_match.group(1).strip() if title_match else target_name,
+                    'type': 'monitor',
+                    'address': ''
+                }
+
+                if pagetop_match:
+                    monitor_info['title'] = pagetop_match.group(1).strip()
+                    monitor_info['address'] = pagetop_match.group(2).strip()
+
+                all_monitors.append(monitor_info)
+
+        except Exception as e:
+            print(f"{prefix}Warning: Failed to parse config file '{config_file}': {e}", file=sys.stderr)
+            continue
+
+    if not all_monitors:
+        print(f"{prefix}Warning: No monitors found in any config files", file=sys.stderr)
+        return
 
     # Build HTML content
     html_lines = [
@@ -2233,7 +2284,7 @@ def generate_mrtg_index(config: Dict[str, Any], index_path: str) -> None:
         "<html>",
         "<head>",
         "    <meta charset='UTF-8'>",
-        f"    <title>{config['site']['name']} - Network Monitoring</title>",
+        f"    <title>{site_name}</title>",
         "    <style>",
         "        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }",
         "        h1 { color: #333; }",
@@ -2248,21 +2299,21 @@ def generate_mrtg_index(config: Dict[str, Any], index_path: str) -> None:
         "    </style>",
         "</head>",
         "<body>",
-        f"    <h1>{config['site']['name']} - Network Monitoring</h1>",
+        f"    <h1>{site_name}</h1>",
         "    <div class='grid'>",
     ]
 
     # Add each monitor as a grid item
-    for resource in config['monitors']:
-        safe_name = re.sub(r'[^\w\-.]', '_', resource['name'])
+    for monitor in all_monitors:
+        safe_name = monitor['name']
 
         html_lines.extend([
             "        <div class='monitor'>",
-            f"            <h2><a href='/mrtg-rrd/{safe_name}.html'>{resource['name']}</a></h2>",
+            f"            <h2><a href='/mrtg-rrd/{safe_name}.html'>{monitor['title']}</a></h2>",
             f"            <a href='/mrtg-rrd/{safe_name}.html'>",
-            f"                <img src='{safe_name}-day.png' alt='{resource['name']} Daily Graph'>",
+            f"                <img src='/mrtg-rrd/{safe_name}-day.png' alt='{monitor['title']} Daily Graph'>",
             "            </a>",
-            f"            <p style='font-size: 12px; color: #666;'>{resource['type'].upper()}: {resource['address']}</p>",
+            f"            <p style='font-size: 12px; color: #666;'>{monitor['address']}</p>",
             "        </div>",
         ])
 
@@ -2291,10 +2342,90 @@ def generate_mrtg_index(config: Dict[str, Any], index_path: str) -> None:
         os.replace(new_path, current_path)
 
         if VERBOSE:
-            print(f"{prefix}Generated MRTG index: {index_path}")
+            print(f"{prefix}Generated MRTG master index: {index_path} ({len(all_monitors)} monitors)")
 
     except Exception as e:
-        print(f"{prefix}Failed to generate MRTG index '{index_path}': {e}", file=sys.stderr)
+        print(f"{prefix}Failed to generate MRTG master index '{index_path}': {e}", file=sys.stderr)
+
+
+def update_mrtg_rrd_cgi_config(work_dir: str, mrtg_config_path: str) -> List[str]:
+    """Update mrtg-rrd.cgi.pl to include the new MRTG config path.
+
+    Args:
+        work_dir: MRTG working directory where mrtg-rrd.cgi.pl is located
+        mrtg_config_path: Full path to the MRTG config file to add
+
+    Returns:
+        List of all MRTG config file paths (empty list if file not found or error)
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    cgi_path = Path(work_dir) / 'mrtg-rrd.cgi.pl'
+
+    if not cgi_path.exists():
+        if VERBOSE:
+            print(f"{prefix}Warning: mrtg-rrd.cgi.pl not found at {cgi_path}, skipping config update")
+        return []
+
+    try:
+        # Read the current CGI file
+        with open(cgi_path, 'r') as f:
+            content = f.read()
+
+        # Find the BEGIN block with @config_files
+        pattern = r'(BEGIN\s*\{\s*@config_files\s*=\s*qw\()([^)]*)\)'
+        match = re.search(pattern, content)
+
+        if not match:
+            print(f"{prefix}Warning: Could not find @config_files declaration in {cgi_path}", file=sys.stderr)
+            return []
+
+        # Extract existing config files
+        existing_configs_str = match.group(2).strip()
+        existing_configs = existing_configs_str.split() if existing_configs_str else []
+
+        # Add new config if not already present
+        if mrtg_config_path not in existing_configs:
+            existing_configs.append(mrtg_config_path)
+
+            # Build new config list
+            new_config_list = ' '.join(existing_configs)
+
+            # Replace the old list with the new one
+            new_content = re.sub(
+                pattern,
+                r'\g<1>' + new_config_list + ')',
+                content
+            )
+
+            # Write back atomically using .new/.old pattern
+            new_path = Path(str(cgi_path) + '.new')
+            old_path = Path(str(cgi_path) + '.old')
+
+            with open(new_path, 'w') as f:
+                f.write(new_content)
+
+            # Atomic rotation
+            if cgi_path.exists():
+                os.replace(cgi_path, old_path)
+            os.replace(new_path, cgi_path)
+
+            if VERBOSE:
+                print(f"{prefix}Updated mrtg-rrd.cgi.pl config list: {existing_configs}")
+        else:
+            if VERBOSE:
+                print(f"{prefix}Config path already present in mrtg-rrd.cgi.pl: {mrtg_config_path}")
+
+        # Set executable permissions (755)
+        os.chmod(cgi_path, 0o755)
+        if VERBOSE:
+            print(f"{prefix}Set permissions 755 on {cgi_path}")
+
+        return existing_configs
+
+    except Exception as e:
+        print(f"{prefix}Failed to update mrtg-rrd.cgi.pl config: {e}", file=sys.stderr)
+        return []
 
 
 def main() -> None:
@@ -2366,17 +2497,18 @@ def main() -> None:
             work_dir = args.generate_mrtg_config
             mrtg_config_path = str(Path(STATEFILE).with_suffix('.mrtg.cfg'))
 
-            # Generate index filename from statefile name
-            statefile_base = Path(STATEFILE).stem
-            index_filename = f"{statefile_base}-index.html"
-            index_path = str(Path(work_dir) / index_filename)
-
             generate_mrtg_config(config, work_dir, mrtg_config_path)
-            generate_mrtg_index(config, index_path)
+            all_config_files = update_mrtg_rrd_cgi_config(work_dir, mrtg_config_path)
+
+            # Generate master index from all config files
+            master_index_path = str(Path(work_dir) / 'index.html')
+            generate_mrtg_index(all_config_files, master_index_path)
 
             print(f"MRTG config generated at: {mrtg_config_path}")
-            print(f"MRTG index generated at: {index_path}")
+            print(f"MRTG master index generated at: {master_index_path}")
             print(f"MRTG working directory: {work_dir}")
+            if all_config_files:
+                print(f"All MRTG config files in mrtg-rrd.cgi.pl: {', '.join(all_config_files)}")
             RRD_ENABLED = True
 
         if args.threads == 1 and 'max_threads' in config['site']:  # only if not overridden by command line

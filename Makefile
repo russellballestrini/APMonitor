@@ -31,6 +31,12 @@ help:
 	@echo "  logs            - Show live service logs (Ctrl+C to exit)"
 	@echo "  test-config     - Test configuration as monitoring user"
 	@echo "  test-webhooks   - Test webhook notifications"
+	@echo ""
+	@echo "Quick start:"
+	@echo "  1. sudo make install         # Install APMonitor"
+	@echo "  2. sudo make installmrtg     # Install MRTG web interface"
+	@echo "  3. Edit /usr/local/etc/apmonitor-config.yaml"
+	@echo "  4. sudo make enable          # Start monitoring"
 
 check-root:
 	@if [ "$$(id -u)" -ne 0 ]; then \
@@ -105,11 +111,12 @@ install: check-root
 	@echo "IMPORTANT: Edit $(CONFIG_DIR)/apmonitor-config.yaml before starting the service"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Edit configuration: nano $(CONFIG_DIR)/apmonitor-config.yaml"
-	@echo "  2. Test configuration: make test-config"
-	@echo "  3. Enable and start:   sudo make enable (or make enable if root)"
-	@echo "  4. Check status:       make status"
-	@echo "  5. View logs:          make logs"
+	@echo "  1. Install MRTG web UI:  sudo make installmrtg"
+	@echo "  2. Edit configuration:   nano $(CONFIG_DIR)/apmonitor-config.yaml"
+	@echo "  3. Test configuration:   make test-config"
+	@echo "  4. Enable and start:     sudo make enable"
+	@echo "  5. Check status:         make status"
+	@echo "  6. View logs:            make logs"
 
 installmrtg: check-root
 	@echo "==> Installing MRTG web interface dependencies..."
@@ -164,19 +171,26 @@ installmrtg: check-root
 	systemctl enable apmonitor-nginx.service
 	systemctl start apmonitor-nginx.service
 
-	@echo ""
-	@echo "==> MRTG web interface installation complete!"
-	@echo ""
-	@echo "Access MRTG at: http://localhost:888/"
-	@echo "MRTG CGI at: http://localhost:888/mrtg-rrd/"
-	@echo ""
-	@echo "Service management:"
-	@echo "  Status:  systemctl status apmonitor-nginx"
-	@echo "  Stop:    systemctl stop apmonitor-nginx"
-	@echo "  Start:   systemctl start apmonitor-nginx"
-	@echo "  Restart: systemctl restart apmonitor-nginx"
-	@echo ""
-	@echo "Note: fcgiwrap socket is set to 777 permissions for compatibility"
+	@HOSTNAME=$$(hostname); \
+	echo ""; \
+	echo "==> MRTG web interface installation complete!"; \
+	echo ""; \
+	echo "Web interface is now running at:"; \
+	echo "  http://localhost:888/"; \
+	echo "  http://$$HOSTNAME:888/"; \
+	echo "  http://<your-ip>:888/"; \
+	echo ""; \
+	echo "MRTG CGI interface:"; \
+	echo "  http://localhost:888/mrtg-rrd/"; \
+	echo ""; \
+	echo "Service management:"; \
+	echo "  Status:  systemctl status apmonitor-nginx"; \
+	echo "  Stop:    systemctl stop apmonitor-nginx"; \
+	echo "  Start:   systemctl start apmonitor-nginx"; \
+	echo "  Restart: systemctl restart apmonitor-nginx"; \
+	echo "  Logs:    journalctl -u apmonitor-nginx -f"; \
+	echo ""; \
+	echo "Note: Make sure port 888 is open in your firewall"
 
 uninstall: check-root
 	@echo "==> Stopping and disabling services..."

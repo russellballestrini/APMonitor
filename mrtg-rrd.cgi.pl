@@ -40,7 +40,7 @@ use vars qw(@config_files @all_config_files %targets $config_time
 	%directories $version $imagetype);
 
 # EDIT THIS to reflect all your MRTG config files
-BEGIN { @config_files = qw(/var/www/html/mrtg/apmonitor.mrtg.cfg); }
+BEGIN { @config_files = qw(); }
 
 $version = '0.7';
 
@@ -75,8 +75,8 @@ sub handler ($)
 
 	$dir =~ s/^\///;
 
-	print_error("Undefined statistics")
-		unless defined $targets{$stat};
+    print_error("Undefined statistics: '$stat' not found in targets. Available targets: " . join(", ", sort keys %targets))
+	    unless defined $targets{$stat};
 
 	print_error("Incorrect directory")
 		unless defined $targets{$stat}{directory} || $targets{$stat}{directory} eq $dir;
@@ -762,9 +762,20 @@ sub read_mrtg_config($$$$)
 
 	my %defaults = %$def;
 
+	# Skip if file doesn't exist
+	unless (-e $file) {
+		warn "Warning: Config file '$file' not found, skipping\n" if $^W;
+		return;
+	}
+
 	my @lines;
 
-	open(CFG, "<$file") || print_error("Cannot open config file: $!");
+	# Use 'or' instead of '||' to avoid calling print_error on failure
+	unless (open(CFG, "<$file")) {
+		warn "Warning: Cannot open config file '$file': $!, skipping\n" if $^W;
+		return;
+	}
+
 	while (<CFG>) {
 		chomp;                    # remove newline
 		s/\s+$//;                 # remove trailing space
@@ -781,7 +792,7 @@ sub read_mrtg_config($$$$)
 
 	foreach (@lines) {
 		if (/^\s*([\w\d]+)\[(\S+)\]\s*:\s*(.*)$/) {
-			my ($tgt, $opt, $val) = (lc($2), lc($1), $3);
+			my ($tgt, $opt, $val) = ($2, lc($1), $3);
 			unless (exists $targets{$tgt}) {
 				# pre-set defaults constructed on all of ^, _, and $
 				for my $key (%{$targets{'^'}}) {
@@ -852,7 +863,7 @@ sub read_mrtg_config($$$$)
 			$cfgref->{$opt} = $val;
 			next;
 		}
-		print_error("Parse error in $file near $_");
+		warn "Warning: Parse error in $file near $_\n" if $^W;
 	}
 
 	if (defined $cfgref->{pathadd}) {
