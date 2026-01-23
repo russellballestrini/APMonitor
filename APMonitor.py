@@ -44,7 +44,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -2191,6 +2191,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
             f"Legend2[{safe_name}]: Availability",
             f"LegendI[{safe_name}]: Response:",
             f"LegendO[{safe_name}]: Up:",
+            f"WithPeak[{safe_name}]: dwmy",  # Add this line - shows peak response times
             f"",
         ])
 

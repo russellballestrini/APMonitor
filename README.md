@@ -164,59 +164,76 @@ To see how the alarm pacing will accelerate then subsequently delay notification
 
 Note that alarm pacing can be set at a global level in the `site:` config, and is overridden when set at a per monitored resource level in the `monitors:` section of the config.
 
-# MRTG Integration for Performance Graphing (EXPERIMENTAL IN V1.2.1)
+# MRTG/RRD Integration for Performance Graphing
 
-APMonitor can generate MRTG configuration files for visualizing resource availability and response times using RRDTool databases.
+APMonitor integrates with MRTG (Multi Router Traffic Grapher) and RRDtool to provide historical performance graphs of resource availability and response times. This integration enables trend analysis, capacity planning, and visual monitoring dashboards.
 
-**Note: MRTG, RRD, mrtg-rrd, SNMP & librosa integration is highly experimental, a house of cards and will change. I am using RRDTool for keeping frequency domain/time domain data for now and need to do alot more to get MRTG working correctly. USE AT YOUR OWN PERIL! (It's highly recommended that you use [version 1.2.0 instead](https://github.com/CompSciFutures/APMonitor/releases/tag/1.2.0)).**
+## Quick Start
 
-## Generating MRTG Configuration
+Install MRTG and related dependencies:
 ```bash
-./APMonitor.py -s /tmp/statefile.json config.yaml --generate-mrtg-config [WORKDIR]
+sudo make installmrtg
 ```
 
-**Parameters:**
-- `--generate-mrtg-config` - Generates MRTG config and exits. Enables RRD data collection for subsequent monitoring runs.
-- `WORKDIR` (optional) - Directory where MRTG will generate graphs. Default: `/var/www/html/mrtg`
+This installs nginx on port 888, fcgiwrap for CGI support, and sets up the MRTG web interface.
+
+Enable RRD data collection by running APMonitor with `--generate-mrtg-config`:
+```bash
+./APMonitor.py -vv -s /var/tmp/apmonitor-statefile.json config.yaml --generate-mrtg-config
+```
+
+Access graphs at `http://localhost:888/` or `http://<your-ip>:888/`.
+
+## How It Works
+
+When `--generate-mrtg-config` is specified:
+
+1. **RRD Collection Enabled**: APMonitor records response times and availability status to RRDtool databases
+2. **MRTG Config Generated**: Creates `.mrtg.cfg` file with monitor definitions
+3. **Web Interface Updated**: Updates `mrtg-rrd.cgi.pl` and generates `index.html` with graph thumbnails
+4. **Continuous Updates**: Subsequent runs update RRD files with latest metrics
 
 **Output:**
-- MRTG config file: Path derived from statefile by replacing `.json` with `.mrtg.cfg`
-  - Example: `/tmp/statefile.json` → `/tmp/statefile.mrtg.cfg`
-- RRD files: Created in `{statefile-dir}/{statefile-name}.rrd/` directory
-  - Example: `/tmp/statefile.json` → `/tmp/statefile.rrd/monitor-name-availability.rrd`
+- MRTG config: `{statefile-path}.mrtg.cfg` (e.g., `/var/tmp/apmonitor-statefile.mrtg.cfg`)
+- RRD databases: `{statefile-dir}/{statefile-name}.rrd/{monitor}-availability.rrd`
+- Web interface: `http://localhost:888/` (master index) and `http://localhost:888/mrtg-rrd/` (CGI interface)
 
-**Examples:**
+## Command Options
 
-Using default working directory:
+Generate MRTG config with default working directory (`/var/www/html/mrtg`):
 ```bash
-./APMonitor.py -s /tmp/statefile.json config.yaml --generate-mrtg-config
-# Output: MRTG config generated at: /tmp/statefile.mrtg.cfg
-#         MRTG working directory: /var/www/html/mrtg
+./APMonitor.py -s /var/tmp/statefile.json config.yaml --generate-mrtg-config
 ```
 
-Using custom working directory:
+Specify custom working directory:
 ```bash
-./APMonitor.py -s /tmp/statefile.json config.yaml --generate-mrtg-config /var/www/html/graphs
-# Output: MRTG config generated at: /tmp/statefile.mrtg.cfg
-#         MRTG working directory: /var/www/html/graphs
+./APMonitor.py -s /var/tmp/statefile.json config.yaml --generate-mrtg-config /var/www/html/graphs
 ```
 
-## RRD Data Sources
+## RRD Data Collection
 
-Each RRD file tracks two metrics:
+Each monitor's RRD file tracks two metrics:
 
-- **`response_time`** (GAUGE): Response time in milliseconds
+- **`response_time`** (GAUGE, milliseconds): Time taken for check to complete
   - Range: 0 to unlimited
-  - Value: 'U' (unknown) when check fails
+  - Value: `U` (unknown) when check fails
   
-- **`is_up`** (GAUGE): Availability status
-  - 1 = service up
-  - 0 = service down
+- **`is_up`** (GAUGE, boolean): Service availability
+  - `1` = service up
+  - `0` = service down
 
-**Note:** RRD data collection is disabled by default. Run `--generate-mrtg-config` once to enable RRD tracking, then continue normal monitoring runs to collect data.
+RRD retention policy (MRTG-compatible):
+- High-resolution: 1 day at native check interval
+- Short-term: ~2 days at 5-minute intervals (600 rows)
+- Medium-term: ~12.5 days at 30-minute intervals (600 rows)
+- Long-term: ~50 days at 2-hour intervals (600 rows)
+- Historical: ~2 years at 1-day intervals (732 rows)
 
-## Example commands for working with RRD Files
+## Working with RRD Files Directly
 
+Query RRD database info:
+```bash
+rrdtool info /var/tmp/apmonitor-statefile.rrd/monitor-name-availability.rrd
 ```
 # Run APMonitor with MRTG & RRD enabled
 ./APMonitor.py -vv -s /var/tmp/apmonitor.json test2-apmonitor-config.yaml --generate-mrtg-config
@@ -237,7 +254,11 @@ rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s en
 rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s end-300 -e now 2>/dev/null | grep -v nan | tail -1 | awk '{if (NF>=3) print int($2+0) ":" int($3+0); else print "0:0"}' | grep -E '^[0-9]+:[0-9]+$' || echo '0:0'
 ```
 
-Refer to [FSF Directory](https://directory.fsf.org/wiki/Mrtg-rrd) and WaybackMachine page on [mrtg-rrd.cgi](https://web.archive.org/web/20081228131907/http://www.fi.muni.cz:80/~kas/mrtg-rrd/cvsweb.cgi/FAQ?rev=HEAD) for more information.
+**References:**
+- [MRTG-RRD Documentation](https://directory.fsf.org/wiki/Mrtg-rrd)
+- [mrtg-rrd.cgi FAQ](https://web.archive.org/web/20081228131907/http://www.fi.muni.cz:80/~kas/mrtg-rrd/cvsweb.cgi/FAQ?rev=HEAD)
+
+**Note:** RRD data collection is disabled by default. Run with `--generate-mrtg-config` once to enable, then continue normal monitoring to collect historical data.
 
 # `APMonitor.py` YAML/JSON Site Configuration Options
 
@@ -1315,7 +1336,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.3
+Software: APMonitor 1.2.4
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```

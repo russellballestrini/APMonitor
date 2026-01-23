@@ -446,6 +446,14 @@ sub do_image($$)
 			unless $noo;
 	}
 
+    # Add after the @local_args section, before RRDs::graph call:
+    if (defined $target->{options}{dualaxis}) {
+        # Right axis for availability (0-100%)
+        push @local_args, '--right-axis', '0.01:0';
+        push @local_args, '--right-axis-label', 'Availability %';
+        push @local_args, '--right-axis-format', '%.0lf%%';
+    }
+
 	my @rv = RRDs::graph($file, '-s', "-$back", @local_args,
 		@{$target->{args}}, "VRULE:$oldsec#ff0000",
 		"VRULE:$seconds#ff0000", @local_args_end);
