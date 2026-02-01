@@ -231,10 +231,10 @@ RRD retention policy (MRTG-compatible):
 
 ## Working with RRD Files Directly
 
-Query RRD database info:
 ```bash
+Query RRD database info:
 rrdtool info /var/tmp/apmonitor-statefile.rrd/monitor-name-availability.rrd
-```
+
 # Run APMonitor with MRTG & RRD enabled
 ./APMonitor.py -vv -s /var/tmp/apmonitor.json test2-apmonitor-config.yaml --generate-mrtg-config
 
