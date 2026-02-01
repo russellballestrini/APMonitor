@@ -229,6 +229,12 @@ RRD retention policy (MRTG-compatible):
 - Long-term: ~50 days at 2-hour intervals (600 rows)
 - Historical: ~2 years at 1-day intervals (732 rows)
 
+## Expected Output
+
+Installing MRTG will spin up a web server with FastCGI on http://localhost:888/, as follows:
+
+![mrtg-availability.png](images/mrtg-availability.png)
+
 ## Working with RRD Files Directly
 
 ```bash
