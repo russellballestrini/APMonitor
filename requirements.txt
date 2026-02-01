@@ -10,9 +10,11 @@ pyasn1_modules==0.4.2
 pycparser==2.23
 pylsqpack==0.3.23
 pyOpenSSL==25.3.0
+pysnmp==7.1.22
 PyYAML==6.0.3
 requests==2.32.5
 rrdtool==0.1.16
 service-identity==24.2.0
 typing_extensions==4.15.0
 urllib3==2.5.0
+pysnmp-se

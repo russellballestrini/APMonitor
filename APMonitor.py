@@ -44,7 +44,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -490,7 +490,7 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 'type', 'name', 'address', 'check_every_n_secs', 'notify_every_n_secs',
                 'notify_on_down_every_n_secs', 'after_every_n_notifications', 'heartbeat_url',
                 'heartbeat_every_n_secs', 'expect', 'ssl_fingerprint', 'ignore_ssl_expiry', 'email',
-                'send', 'content_type'
+                'send', 'content_type', 'community'
             }
             unrecognized_monitor = set(monitor.keys()) - valid_monitor_params
             if unrecognized_monitor:
@@ -507,7 +507,7 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
             monitor_names.add(name)
 
             # Validate type field
-            valid_types = ['ping', 'http', 'quic', 'tcp', 'udp']
+            valid_types = ['ping', 'http', 'quic', 'tcp', 'udp', 'snmp']
             if monitor['type'] not in valid_types:
                 raise ConfigError(f"Monitor {i} (name: {monitor.get('name', 'unknown')}): invalid type '{monitor['type']}', must be one of {valid_types}")
 
@@ -627,6 +627,51 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 # 'ssl_fingerprint' not allowed for TCP/UDP
                 if 'ssl_fingerprint' in monitor:
                     raise ConfigError(f"Monitor {i} (name: {name}): 'ssl_fingerprint' field is only valid for 'http' and 'quic' monitors")
+
+            elif monitor_type == 'snmp':
+                # Validate URL/URI with snmp:// scheme
+                parsed = urlparse(address)
+                if parsed.scheme != 'snmp':
+                    raise ConfigError(f"Monitor {i} (name: {name}): SNMP monitor must use 'snmp://' scheme, got '{address}'")
+                if not parsed.netloc:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'address' must include hostname/IP, got '{address}'")
+
+                # Validate hostname or IP address (IPv4 or IPv6)
+                hostname = parsed.hostname
+                if hostname:
+                    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+                    ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+                    hostname_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'
+
+                    if not (re.match(ipv4_pattern, hostname) or re.match(ipv6_pattern, hostname) or re.match(hostname_pattern, hostname)):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'address' hostname must be valid hostname, IPv4 or IPv6 address, got '{hostname}'")
+
+                # Validate optional 'community' string
+                if 'community' in monitor:
+                    if not isinstance(monitor['community'], str):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'community' must be a string")
+                    if len(monitor['community']) == 0:
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'community' must not be empty")
+
+                # 'expect' not allowed for SNMP
+                if 'expect' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'expect' field not valid for SNMP monitors")
+
+                # 'ssl_fingerprint' not allowed for SNMP
+                if 'ssl_fingerprint' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'ssl_fingerprint' field not valid for SNMP monitors")
+
+                # 'ignore_ssl_expiry' not allowed for SNMP
+                if 'ignore_ssl_expiry' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'ignore_ssl_expiry' field not valid for SNMP monitors")
+
+                # 'send' not allowed for SNMP
+                if 'send' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'send' field not valid for SNMP monitors")
+
+                # 'content_type' not allowed for SNMP
+                if 'content_type' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'content_type' field not valid for SNMP monitors")
 
             # Validate heartbeat_url if present (valid for all monitor types)
             if 'heartbeat_url' in monitor:
@@ -1317,6 +1362,143 @@ def check_ping_resource(resource: Dict[str, Any]) -> Optional[str]:
         return error_msg
 
 
+def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
+    """Poll SNMP device for interface bandwidth/retransmit metrics and update RRD."""
+    try:
+        from easysnmp import Session
+    except ImportError as e:
+        error_msg = f"easysnmp library import failed: {e} (try: pip install easysnmp)"
+        prefix = getattr(thread_local, 'prefix', '')
+        print(f"{prefix}SNMP check FAILED: {error_msg}", file=sys.stderr)
+        return error_msg
+
+    prefix = getattr(thread_local, 'prefix', '')
+    address = resource['address']
+    name = resource['name']
+
+    # Parse SNMP configuration from address (format: snmp://community@host:port)
+    parsed = urlparse(address)
+    if parsed.scheme != 'snmp':
+        error_msg = f"{parsed.scheme.upper()} protocol not supported for SNMP, use snmp"
+        print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg
+
+    # Extract community string - priority: monitor config > URL userinfo > default 'public'
+    community = resource.get('community') or parsed.username or 'public'
+    hostname = parsed.hostname
+    port = parsed.port or 161
+
+    if not hostname:
+        error_msg = "SNMP address must include hostname"
+        print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg
+
+    # Standard SNMP OIDs for interface statistics
+    OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2'  # IF-MIB::ifDescr
+    OID_IF_IN_OCTETS = '1.3.6.1.2.1.2.2.1.10'  # IF-MIB::ifInOctets
+    OID_IF_OUT_OCTETS = '1.3.6.1.2.1.2.2.1.16'  # IF-MIB::ifOutOctets
+    OID_TCP_RETRANS_SEGS = '1.3.6.1.2.1.6.12.0'  # TCP-MIB::tcpRetransSegs
+
+    try:
+        # Create SNMP session
+        session = Session(
+            hostname=hostname,
+            community=community,
+            version=2,
+            remote_port=port,
+            timeout=MAX_TRY_SECS,
+            retries=MAX_RETRIES - 1
+        )
+
+        # Walk interface table to discover all interfaces
+        interfaces = {}
+
+        try:
+            if_descr_items = session.walk(OID_IF_DESCR)
+
+            for item in if_descr_items:
+                if_index = item.oid.split('.')[-1]
+                if_name = item.value
+                interfaces[if_index] = {'name': if_name}
+        except Exception as e:
+            error_msg = f"SNMP walk failed: {e}"
+            print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
+            return error_msg
+
+        if not interfaces:
+            error_msg = "no interfaces found"
+            print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
+            return error_msg
+
+        # Poll I/O counters for each interface
+        for if_index in interfaces:
+            # Get input octets
+            try:
+                item = session.get(f"{OID_IF_IN_OCTETS}.{if_index}")
+                interfaces[if_index]['in_octets'] = int(item.value)
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET {OID_IF_IN_OCTETS}.{if_index} (ifInOctets) = {interfaces[if_index]['in_octets']}")
+            except Exception as e:
+                interfaces[if_index]['in_octets'] = None
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET {OID_IF_IN_OCTETS}.{if_index} (ifInOctets) FAILED: {e}")
+
+            # Get output octets
+            try:
+                item = session.get(f"{OID_IF_OUT_OCTETS}.{if_index}")
+                interfaces[if_index]['out_octets'] = int(item.value)
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET {OID_IF_OUT_OCTETS}.{if_index} (ifOutOctets) = {interfaces[if_index]['out_octets']}")
+            except Exception as e:
+                interfaces[if_index]['out_octets'] = None
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET {OID_IF_OUT_OCTETS}.{if_index} (ifOutOctets) FAILED: {e}")
+
+        # Get TCP retransmit segments (global counter)
+        tcp_retrans = None
+        try:
+            item = session.get(OID_TCP_RETRANS_SEGS)
+            tcp_retrans = int(item.value)
+            if VERBOSE:
+                print(f"{prefix}SNMP GET {OID_TCP_RETRANS_SEGS} (tcpRetransSegs) = {tcp_retrans}")
+        except Exception as e:
+            if VERBOSE:
+                print(f"{prefix}SNMP GET {OID_TCP_RETRANS_SEGS} (tcpRetransSegs) FAILED: {e}")
+
+        # Update RRD database if enabled
+        if RRD_ENABLED:
+            check_every_n_secs = resource.get('check_every_n_secs', DEFAULT_CHECK_EVERY_N_SECS)
+            rrd_path = get_rrd_path(name, 'snmp')
+
+            if not os.path.exists(rrd_path):
+                create_snmp_rrd(rrd_path, check_every_n_secs, interfaces)
+
+            update_snmp_rrd(rrd_path, datetime.now(), interfaces, tcp_retrans)
+
+            if VERBOSE:
+                print(f"{prefix}RRD updated: {rrd_path}")
+
+        # Verbose output
+        if VERBOSE:
+            print(f"{prefix}SNMP poll SUCCESS for '{name}': {len(interfaces)} interfaces, tcp_retrans={tcp_retrans}")
+            for if_index in sorted(interfaces.keys()):
+                if_data = interfaces[if_index]
+                in_octets = if_data.get('in_octets', 'N/A')
+                out_octets = if_data.get('out_octets', 'N/A')
+                in_str = f"{in_octets:,}" if in_octets != 'N/A' else 'N/A'
+                out_str = f"{out_octets:,}" if out_octets != 'N/A' else 'N/A'
+                print(f"{prefix}  Interface {if_index} ({if_data['name']}): in={in_str} out={out_str}")
+
+        return None  # Success
+
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        print(f"{prefix}SNMP check FAILED for '{name}' at '{address}': {error_msg}", file=sys.stderr)
+        if VERBOSE > 1:
+            traceback.print_exc(file=sys.stderr)
+        return error_msg
+
+
 def check_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
     """Check resource with retry logic and response time tracking."""
     last_response_time_ms = None
@@ -1326,6 +1508,8 @@ def check_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[in
 
         if resource['type'] == 'ping':
             error_msg = check_ping_resource(resource)
+        elif resource['type'] == "snmp":
+            error_msg = check_snmp_resource(resource)
         elif resource['type'] in ('http', 'quic', 'tcp', 'udp'):
             error_msg = check_url_resource(resource)
         else:
@@ -1753,23 +1937,22 @@ def is_heartbeat_due(
         return True, None
 
 
-def get_rrd_path(monitor_name: str) -> str:
+def get_rrd_path(monitor_name: str, metric_type: str = 'availability') -> str:
     """Generate filesystem-safe RRD file path for a monitor.
 
     Args:
         monitor_name: Name of the monitor
+        metric_type: Type of metrics ('availability' or 'snmp')
 
     Returns:
         str: Full path to RRD file
     """
-    # Sanitize monitor name for filesystem (replace unsafe chars with underscore)
     safe_name = re.sub(r'[^\w\-.]', '_', monitor_name)
 
-    # Use statefile directory, append .rrd/{monitor_name}-availability.rrd
     base_path = Path(STATEFILE)
     rrd_dir = base_path.parent / (base_path.stem + '.rrd')
 
-    return str(rrd_dir / f"{safe_name}-availability.rrd")
+    return str(rrd_dir / f"{safe_name}-{metric_type}.rrd")
 
 
 def create_rrd(rrd_path: str, step_secs: int) -> None:
@@ -1809,6 +1992,55 @@ def create_rrd(rrd_path: str, step_secs: int) -> None:
             print(f"{prefix}Created RRD file: {rrd_path} (step={step_secs}s)")
     except rrdtool.OperationalError as e:
         print(f"{prefix}Failed to create RRD file '{rrd_path}': {e}", file=sys.stderr)
+
+
+def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[str, Any]]) -> None:
+    """Create RRD file for SNMP interface metrics.
+
+    Args:
+        rrd_path: Full path to RRD file to create
+        step_secs: Update interval in seconds
+        interfaces: Dict mapping interface index to interface data (with 'name' key)
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Ensure RRD directory exists
+    os.makedirs(os.path.dirname(rrd_path), exist_ok=True)
+
+    # Calculate heartbeat (2x step allows one missed update)
+    heartbeat = step_secs * 2
+
+    # Build data sources dynamically for each interface
+    data_sources = []
+
+    for if_index, if_data in interfaces.items():
+        # Sanitize interface name for DS name (max 19 chars, alphanumeric + underscore)
+        if_name = if_data['name']
+        safe_if_name = re.sub(r'[^\w]', '_', if_name)[:15]  # Leave room for _in/_out suffix
+
+        # COUNTER type for cumulative byte counters (handles wraps at 32/64-bit boundaries)
+        data_sources.append(f'DS:{safe_if_name}_in:COUNTER:{heartbeat}:0:U')
+        data_sources.append(f'DS:{safe_if_name}_out:COUNTER:{heartbeat}:0:U')
+
+    # Add TCP retransmit counter
+    data_sources.append(f'DS:tcp_retrans:COUNTER:{heartbeat}:0:U')
+
+    # Generate RRAs
+    rras = create_rrd_rras(step_secs)
+
+    # Create RRD
+    try:
+        rrdtool.create(
+            rrd_path,
+            '--step', str(step_secs),
+            '--start', str(int(time.time()) - step_secs),
+            *data_sources,
+            *rras
+        )
+        if VERBOSE:
+            print(f"{prefix}Created SNMP RRD file: {rrd_path} (step={step_secs}s, {len(interfaces)} interfaces, {len(data_sources)} data sources)")
+    except rrdtool.OperationalError as e:
+        print(f"{prefix}Failed to create SNMP RRD file '{rrd_path}': {e}", file=sys.stderr)
 
 
 def create_rrd_rras(step_secs: int) -> List[str]:
@@ -1885,6 +2117,57 @@ def update_rrd(rrd_path: str, timestamp: datetime, response_time_ms: Optional[in
             print(f"{prefix}Updated RRD: {rrd_path} @ {epoch} response={response_val}ms is_up={is_up_val}")
     except rrdtool.OperationalError as e:
         print(f"{prefix}Failed to update RRD file '{rrd_path}': {e}", file=sys.stderr)
+
+
+def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Dict[str, Any]], tcp_retrans: Optional[int]) -> None:
+    """Update SNMP RRD file with latest interface metrics.
+
+    Args:
+        rrd_path: Full path to RRD file
+        timestamp: Timestamp of the measurement
+        interfaces: Dict mapping interface index to metrics (with 'in_octets', 'out_octets')
+        tcp_retrans: TCP retransmit segments counter
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Convert to epoch timestamp
+    epoch = int(timestamp.timestamp())
+
+    # Build template string (DS names in order)
+    ds_names = []
+    values = []
+
+    for if_index in sorted(interfaces.keys()):  # Stable sort for deterministic DS order
+        if_data = interfaces[if_index]
+        if_name = if_data['name']
+        safe_if_name = re.sub(r'[^\w]', '_', if_name)[:15]
+
+        ds_names.append(f'{safe_if_name}_in')
+        ds_names.append(f'{safe_if_name}_out')
+
+        in_octets = if_data.get('in_octets', 'U')
+        out_octets = if_data.get('out_octets', 'U')
+
+        values.append(str(in_octets) if in_octets != 'U' else 'U')
+        values.append(str(out_octets) if out_octets != 'U' else 'U')
+
+    # Add TCP retransmit
+    ds_names.append('tcp_retrans')
+    values.append(str(tcp_retrans) if tcp_retrans is not None else 'U')
+
+    template = ':'.join(ds_names)
+    value_str = ':'.join(values)
+
+    try:
+        rrdtool.update(
+            rrd_path,
+            '--template', template,
+            f'{epoch}:{value_str}'
+        )
+        if VERBOSE > 1:
+            print(f"{prefix}Updated SNMP RRD: {rrd_path} @ {epoch} ({len(interfaces)} interfaces)")
+    except rrdtool.OperationalError as e:
+        print(f"{prefix}Failed to update SNMP RRD file '{rrd_path}': {e}", file=sys.stderr)
 
 
 def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -> None:

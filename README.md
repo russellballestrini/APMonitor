@@ -39,7 +39,6 @@ Ex Chief Scientist @ Clemenger BBDO / Omnicom</i>
 # Quickstart
 
 To run APMonitor with a configuration file `test-apmonitor-config.yaml ` & auto-created statefile `/tmp/statefile.json`:
-
 ```
  ./APMonitor.py -vv -s /tmp/statefile.json test-apmonitor-config.yaml 
 ```
@@ -55,8 +54,9 @@ The design philosophy centers on simplicity and elegance: a single, unified sour
 Key Features:
 
 - Near-realtime programming so heartbeats and alerts arrive when they say they are going to (+/- 10 secs)
-- Multithreaded high-speed availability checking for PING, TCP, UDP, QUIC and HTTP(S) resources
+- Multithreaded high-speed availability checking for PING, TCP, UDP, QUIC, HTTP(S), and SNMP resources
 - SSL/TLS certificate checking and pinning so you can use self-signed certificates on-lan safely
+- SNMP monitoring for network device interface bandwidth, I/O statistics, and TCP retransmit metrics
 - Integration with Site24x7/PagerDuty heartbeat monitoring for high-availability second-opinion and failover alerting
 - Integration with Slack and Pushover webhooks for notifications, plus standard email support
 - Smart notification pacing: rapid alerts initially, then gradually decreasing frequency for extended outages
@@ -203,7 +203,9 @@ When `--generate-mrtg-config` is specified:
 
 **Output:**
 - MRTG config: `{statefile-path}.mrtg.cfg` (e.g., `/var/tmp/apmonitor-statefile.mrtg.cfg`)
-- RRD databases: `{statefile-dir}/{statefile-name}.rrd/{monitor}-availability.rrd`
+- RRD databases: 
+  - Availability monitors: `{statefile-dir}/{statefile-name}.rrd/{monitor}-availability.rrd`
+  - SNMP monitors: `{statefile-dir}/{statefile-name}.rrd/{monitor}-snmp.rrd`
 - Web interface: `http://localhost:888/` (master index) and `http://localhost:888/mrtg-rrd/` (CGI interface)
 
 ## Command Options
@@ -220,7 +222,9 @@ Specify custom working directory:
 
 ## RRD Data Collection
 
-Each monitor's RRD file tracks two metrics:
+### Availability Monitors (ping, http, quic, tcp, udp)
+
+Each availability monitor's RRD file tracks two metrics:
 
 - **`response_time`** (GAUGE, milliseconds): Time taken for check to complete
   - Range: 0 to unlimited
@@ -230,7 +234,25 @@ Each monitor's RRD file tracks two metrics:
   - `1` = service up
   - `0` = service down
 
-RRD retention policy (MRTG-compatible):
+### SNMP Monitors
+
+SNMP monitors create RRD files with dynamic data sources based on discovered network interfaces:
+
+- **Interface Traffic Counters** (COUNTER, bytes): Cumulative byte counters per interface
+  - `{interface_name}_in`: Inbound bytes (IF-MIB::ifInOctets)
+  - `{interface_name}_out`: Outbound bytes (IF-MIB::ifOutOctets)
+  
+- **TCP Retransmissions** (COUNTER, segments): TCP retransmit counter
+  - `tcp_retrans`: Global TCP retransmission counter (TCP-MIB::tcpRetransSegs)
+
+**SNMP Specifics:**
+- Interface names are sanitized (alphanumeric + underscore, max 15 chars) to fit RRD's 19-character DS name limit
+- COUNTER type automatically calculates rates (bytes/second) and handles 32/64-bit wraparound
+- All interfaces for a device are stored in a single RRD file for atomic updates
+- Interface list is discovered automatically via SNMP walk of IF-MIB::ifDescr table
+
+### RRD Retention Policy (MRTG-compatible)
+
 - High-resolution: 1 day at native check interval
 - Short-term: ~2 days at 5-minute intervals (600 rows)
 - Medium-term: ~12.5 days at 30-minute intervals (600 rows)
@@ -244,10 +266,12 @@ Installing MRTG will spin up a web server with FastCGI on http://localhost:888/,
 ![mrtg-availability.png](images/mrtg-availability.png)
 
 ## Working with RRD Files Directly
-
 ```bash
-Query RRD database info:
+# Query availability RRD database info
 rrdtool info /var/tmp/apmonitor-statefile.rrd/monitor-name-availability.rrd
+
+# Query SNMP RRD database info
+rrdtool info /var/tmp/apmonitor-statefile.rrd/switch-snmp.rrd
 
 # Run APMonitor with MRTG & RRD enabled
 ./APMonitor.py -vv -s /var/tmp/apmonitor.json test2-apmonitor-config.yaml --generate-mrtg-config
@@ -261,8 +285,11 @@ rrdtool info /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd | head -50
 # Check the last update timestamp
 rrdtool lastupdate /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd
 
-# Fetch the last 300 ms
+# Fetch the last 300 seconds
 rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s end-300 -e now
+
+# Fetch SNMP interface data
+rrdtool fetch /var/tmp/apmonitor.rrd/switch-snmp.rrd AVERAGE -s end-3600 -e now
 
 # Test the fetch command for one monitor
 rrdtool fetch /var/tmp/apmonitor.rrd/tellusion-gw-availability.rrd AVERAGE -s end-300 -e now 2>/dev/null | grep -v nan | tail -1 | awk '{if (NF>=3) print int($2+0) ":" int($3+0); else print "0:0"}' | grep -E '^[0-9]+:[0-9]+$' || echo '0:0'
@@ -318,6 +345,15 @@ site:
   after_every_n_notifications: 1
 
 monitors:
+  # SNMP network device monitoring
+  - type: snmp
+    name: core-switch
+    address: "snmp://192.168.1.1"
+    community: "public"
+    check_every_n_secs: 300
+    heartbeat_url: "https://hc-ping.com/uuid-here"
+    heartbeat_every_n_secs: 600
+
   # TCP port check with send/receive
   - type: tcp
     name: smtp-server
@@ -340,14 +376,6 @@ monitors:
     send: "01 02 03 04"
     content_type: hex
     expect: "OK"
-    check_every_n_secs: 60
-    
-  - type: udp
-    name: router-snmp
-    address: "udp://192.168.1.1:161"
-    send: "30260201000406707562...." # SNMP GET request
-    content_type: "hex"
-    expect: "30"  # SNMP response
     check_every_n_secs: 60
     
   # UDP send with text data
@@ -520,6 +548,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - `quic`: HTTP/3 over QUIC endpoint check (UDP-based, faster than HTTP/HTTPS for high-latency networks)
   - `tcp`: TCP port connectivity and protocol check
   - `udp`: UDP datagram send/receive check
+  - `snmp`: SNMP network device monitoring (interface bandwidth, TCP retransmits)
 
 - **`name`** (string): Unique identifier for this monitor. Must be unique across all monitors in the configuration. Used in notifications and state tracking.
 
@@ -528,6 +557,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - For `http`/`quic`: Full URL with scheme and host
   - For `tcp`: URL with `tcp://` scheme, hostname/IP, and port (e.g., `tcp://server.example.com:22`)
   - For `udp`: URL with `udp://` scheme, hostname/IP, and port (e.g., `udp://192.168.1.1:161`)
+  - For `snmp`: URL with `snmp://` scheme and hostname/IP (e.g., `snmp://192.168.1.1` or `snmp://192.168.1.1:161`)
 
 ### Optional Fields (All Monitor Types)
 
@@ -665,6 +695,88 @@ expect: "SSH-2.0"
 - **Without `expect`**: Fire-and-forget (useful for syslog, statsd) - succeeds if packet sends without socket error, cannot detect if port is listening
 - UDP is connectionless, so there's no "connection established" signal like TCP's three-way handshake
 
+### SNMP Monitor Specific Fields
+
+SNMP monitors poll network devices for interface statistics and TCP metrics using SNMPv2c. These monitors automatically discover all interfaces and collect bandwidth utilization data.
+
+**Required Fields:**
+- **`type`**: Must be `snmp`
+- **`address`**: URL with `snmp://` scheme and hostname/IP (format: `snmp://[community@]hostname[:port]`)
+
+**Optional Fields:**
+- **`community`** (string, optional): SNMP community string for authentication. Default: `public`
+```yaml
+- type: snmp
+  name: office-switch
+  address: "snmp://192.168.1.6"
+  community: "public"
+  check_every_n_secs: 300
+```
+
+**SNMP Address Format:**
+
+The community string can be specified in three ways (in order of precedence):
+
+1. **Monitor-level `community` field** (recommended for clarity):
+```yaml
+- type: snmp
+  name: switch
+  address: "snmp://192.168.1.6"
+  community: "private"
+```
+
+2. **URL userinfo** (inline with address):
+```yaml
+- type: snmp
+  name: switch
+  address: "snmp://private@192.168.1.6"
+```
+
+3. **Default**: If neither is specified, defaults to `public`
+
+**Monitored Metrics:**
+
+SNMP monitors automatically poll these standard MIB objects:
+- **IF-MIB::ifDescr** (1.3.6.1.2.1.2.2.1.2) - Interface descriptions
+- **IF-MIB::ifInOctets** (1.3.6.1.2.1.2.2.1.10) - Bytes received per interface
+- **IF-MIB::ifOutOctets** (1.3.6.1.2.1.2.2.1.16) - Bytes transmitted per interface
+- **TCP-MIB::tcpRetransSegs** (1.3.6.1.2.1.6.12.0) - TCP retransmission segments (global counter)
+
+**RRD Integration:**
+
+When `--generate-mrtg-config` is specified, SNMP monitors create RRD files with dynamic data sources:
+- **Filename**: `{statefile-dir}/{statefile-name}.rrd/{monitor-name}-snmp.rrd`
+- **Data Sources**: One per discovered interface plus TCP retransmits
+  - `{interface}_in` (COUNTER) - Inbound bytes
+  - `{interface}_out` (COUNTER) - Outbound bytes
+  - `tcp_retrans` (COUNTER) - TCP retransmissions
+
+Interface names are sanitized to alphanumeric + underscore, truncated to 15 characters to fit RRD's 19-character DS name limit (leaving room for `_in`/`_out` suffix).
+
+**SNMP Protocol Notes:**
+- Uses SNMPv2c (community-based authentication)
+- Port 161 is the standard SNMP port (can be overridden in address: `snmp://host:1161`)
+- Performs SNMP walk to discover all interfaces automatically
+- COUNTER data sources automatically calculate rates (bytes/second) from cumulative counters
+- Handles 32-bit and 64-bit counter wraparound via RRDtool's COUNTER type
+- All interfaces for a device are stored in a single RRD file for atomic updates
+
+**Example SNMP Monitor Configuration:**
+```yaml
+- type: snmp
+  name: core-switch
+  address: "snmp://192.168.1.1:161"
+  community: "monitoring"
+  check_every_n_secs: 300
+  heartbeat_url: "https://hc-ping.com/uuid-here"
+  heartbeat_every_n_secs: 600
+```
+
+**Field Restrictions:**
+- `expect`, `ssl_fingerprint`, `ignore_ssl_expiry` fields are not valid for SNMP monitors
+- `send` and `content_type` fields are not valid for SNMP monitors
+- SNMP monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
+
 ### Example Configurations
 
 **Ping Monitor:**
@@ -738,14 +850,14 @@ expect: "SSH-2.0"
   check_every_n_secs: 30
 ```
 
-**UDP with Response Validation (SNMP):**
+**UDP with Response Validation (DNS):**
 ```yaml
 - type: udp
-  name: router-snmp
-  address: "udp://192.168.1.1:161"
-  send: "30260201000406707562..."  # SNMP GET request
+  name: dns-server
+  address: "udp://8.8.8.8:53"
+  send: "..." # DNS query packet
   content_type: hex
-  expect: "30"  # SNMP response starts with 0x30
+  expect: "..." # Expected response
   check_every_n_secs: 60
 ```
 
@@ -758,6 +870,17 @@ expect: "SSH-2.0"
   check_every_n_secs: 300
 ```
 
+**SNMP Network Switch:**
+```yaml
+- type: snmp
+  name: office-switch
+  address: "snmp://192.168.1.6"
+  community: "public"
+  check_every_n_secs: 300
+  heartbeat_url: "https://hc-ping.com/uuid-switch"
+  heartbeat_every_n_secs: 600
+```
+
 ### Validation Rules
 
 The configuration validator enforces these rules:
@@ -767,7 +890,7 @@ The configuration validator enforces these rules:
 3. `heartbeat_every_n_secs` can only be specified if `heartbeat_url` exists
 4. `expect`, `ssl_fingerprint`, and `ignore_ssl_expiry` are only valid for HTTP/QUIC monitors
 5. `expect` must be a non-empty string if specified
-6. All URLs must include both scheme (http/https/tcp/udp) and hostname
+6. All URLs must include both scheme (http/https/tcp/udp/snmp) and hostname
 7. Email addresses must match standard email format (RFC 5322 simplified)
 8. SSL fingerprints must be valid hexadecimal strings with length that's a power of two
 9. `after_every_n_notifications` can only be specified if `notify_every_n_secs` is present
@@ -782,22 +905,28 @@ The configuration validator enforces these rules:
 18. `content_type` can only be specified if `send` is present
 19. `content_type` for TCP/UDP must be one of: text, hex, base64 (for HTTP/QUIC it's a raw MIME type string)
 20. `ssl_fingerprint` and `ignore_ssl_expiry` are not allowed for TCP/UDP monitors
+21. SNMP monitors must use `snmp://` scheme
+22. `community` field is optional for SNMP monitors and must be a non-empty string if specified
+23. `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, and `content_type` are not allowed for SNMP monitors
+24. SNMP monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
 
 # Dependencies
 
 Install system-wide for production use:
 ```
-sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl
-sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
+sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl libsnmp-dev
+sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool easysnmp
 ```
 
 Or on Debian 12+ systems:
 ```
-sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl
-sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
+sudo apt install python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl libsnmp-dev
+sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool easysnmp
 ```
 
-**Note**: The `aioquic` package is required for QUIC/HTTP3 monitoring support. If you don't plan to use `type: quic` monitors, you can omit this dependency.
+**Note**: 
+- The `aioquic` package is required for QUIC/HTTP3 monitoring support. If you don't plan to use `type: quic` monitors, you can omit this dependency.
+- The `easysnmp` package and `libsnmp-dev` system library are required for SNMP monitoring support. If you don't plan to use `type: snmp` monitors, you can omit these dependencies.
 
 # Example invocation:
 ```
@@ -936,7 +1065,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'while true; do /usr/local/bin/APMonitor.py -vv -s /var/tmp/apmonitor-statefile.json /usr/local/etc/apmonitor-config.yaml; sleep 10; done'
+ExecStart=/bin/bash -c 'while true; do /usr/local/bin/APMonitor.py -vv -s /var/tmp/apmonitor-statefile.json /usr/local/etc/apmonitor-config.yaml --generate-mrtg-config; sleep 10; done'
 Restart=always
 RestartSec=10
 User=monitoring
@@ -1129,19 +1258,19 @@ sudo make uninstall
 ## Step 1: Install System Dependencies
 ```
 sudo apt update
-sudo apt install python3 python3-pip -y
+sudo apt install python3 python3-pip libsnmp-dev -y
 ```
 
 ## Step 2: Install Python Dependencies
 
 Install dependencies globally (required for systemd service):
 ```
-sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic
+sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 ```
 
 **Note**: On Debian 12+, the `--break-system-packages` flag is required. On older systems, omit this flag:
 ```
-sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic
+sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 ```
 
 **Dependencies installed**:
@@ -1150,6 +1279,7 @@ sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic
 - `pyOpenSSL` - SSL certificate verification and fingerprint checking
 - `urllib3` - HTTP connection pooling (dependency of requests)
 - `aioquic` - QUIC/HTTP3 protocol support (required for `type: quic` monitors)
+- `easysnmp` - SNMP monitoring support (required for `type: snmp` monitors)
 
 ## Step 3: Create Monitoring User
 
@@ -1189,7 +1319,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'while true; do /usr/local/bin/APMonitor.py -vv -s /var/tmp/apmonitor-statefile.json /usr/local/etc/apmonitor-config.yaml; sleep 10; done'
+ExecStart=/bin/bash -c 'while true; do /usr/local/bin/APMonitor.py -vv -s /var/tmp/apmonitor-statefile.json /usr/local/etc/apmonitor-config.yaml --generate-mrtg-config; sleep 10; done'
 Restart=always
 RestartSec=10
 User=monitoring
@@ -1312,19 +1442,19 @@ sudo rm /var/tmp/apmonitor-statefile.json*
 sudo userdel -r monitoring
 
 # Optionally remove Python dependencies
-sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic
+sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 ```
 
 # TODO
 
 - Add additional monitors:
   - ~~TCP & UDP port monitoring~~ (completed in v1.2.0)
-  - SNMP w/defaults for managed switches and system performance tuning
+  - ~~SNMP w/defaults for managed switches and system performance tuning~~ (completed in v1.2.5)
   - Update docs to provide webhook examples for Pushover, Slack & Discord
 
 - Add additional outputs: 
-  - MRTG compatible logfiles
-  - MRTG compatible graph generation w/index.html
+  - ~~MRTG compatible logfiles~~ (completed in v1.2.3)
+  - ~~MRTG compatible graph generation w/index.html~~ (completed in v1.2.3)
   - Use loess regression on MRTG compatible logfiles for outlier & drop/increase detection
 
 - Aggregated root cause alerting:
@@ -1350,7 +1480,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.4
+Software: APMonitor 1.2.5
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```

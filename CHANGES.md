@@ -9,6 +9,9 @@ Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S 
 Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
 Thread safe, reentrant, easily modifiable.
 
+# Release 1.2.5 (2-Feb-26): Basic SNMP Support
+- Added "snmp" type with interface I/O metrics
+
 # Release 1.2.3 (14-Jan-26): Better MRTG Support
 - Fixed case sensitivity in MRTG target names
 - Fixed MRTG HTML index to overcome caching issues

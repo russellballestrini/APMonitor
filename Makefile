@@ -54,11 +54,11 @@ check-sudo:
 install: check-root
 	@echo "==> Installing system dependencies..."
 	apt update
-	apt install -y python3 python3-pip python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl libcgi-pm-perl
+	apt install -y python3 python3-pip python3-rrdtool librrd-dev python3-dev mrtg rrdtool librrds-perl libcgi-pm-perl libsnmp-dev
 
 	@echo "==> Installing Python dependencies globally..."
 	$(PIP) install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioquic rrdtool || \
-	$(PIP) install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool
+	$(PIP) install PyYAML requests pyOpenSSL urllib3 aioquic rrdtool easysnmp
 
 	@echo "==> Creating monitoring user..."
 	id -u $(USER) >/dev/null 2>&1 || /usr/sbin/useradd -r -s /bin/bash -d /var/lib/apmonitor -m $(USER)
@@ -219,8 +219,8 @@ uninstall: check-root
 	@echo ""
 	@echo "==> Uninstallation complete!"
 	@echo ""
-	@echo "Note: Python dependencies (PyYAML, requests, pyOpenSSL, urllib3) were not removed."
-	@echo "To remove them manually: pip3 uninstall -y PyYAML requests pyOpenSSL urllib3"
+	@echo "Note: Python dependencies (PyYAML, requests, pyOpenSSL, urllib3, easysnmp) were not removed."
+	@echo "To remove them manually: pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic rrdtool easysnmp"
 
 enable: check-root
 	@echo "==> Enabling APMonitor service..."
