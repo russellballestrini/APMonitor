@@ -1480,7 +1480,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.7
+Software: APMonitor 1.2.8
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```

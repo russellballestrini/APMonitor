@@ -13,6 +13,7 @@ Thread safe, reentrant,
 - Added more SNMP metrics for CPU, PPS, KBits/Sec & Memory
 - Rendered more SNMP metrics for CPU, PPS, KBits/Sec & Memory into index.html
 - Tuned layout of Network vs. Availability monitors
+- Changed to 4 column layout and put retransmits onto separate chart
 
 # Realease 1.2.7 (12-Feb-26): MRTG Dualaxis Bugfix
 - Fixed Y-axis limits to actually display data

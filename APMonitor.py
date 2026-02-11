@@ -44,7 +44,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.2.7"
+__version__ = "1.2.8"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -2683,7 +2683,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
         monitor_type = resource['type']
 
         if monitor_type == 'snmp':
-            # SNMP monitors get three separate targets
+            # SNMP monitors get four separate targets
             rrd_path = get_rrd_path(resource['name'], 'snmp')
 
             # Target 1: Bandwidth (total_bits_in / total_bits_out)
@@ -2706,15 +2706,15 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
                 f"",
             ])
 
-            # Target 2: Packets (total_pkts_in / total_pkts_out, with tcp_retrans overlay)
+            # Target 2: Packets (total_pkts_in / total_pkts_out)
             mrtg_lines.extend([
                 f"######################################################################",
-                f"# {resource['name']} - Total Packets & TCP Retransmits",
+                f"# {resource['name']} - Total Packets",
                 f"",
                 f"Target[{safe_name}-packets]: total_pkts_in&total_pkts_out:{rrd_path}",
                 f"MaxBytes[{safe_name}-packets]: 10000000",  # 10M pps max
-                f"Title[{safe_name}-packets]: {resource['name']} - Packets & Retransmits",
-                f"PageTop[{safe_name}-packets]: <h1>{resource['name']} ({resource['address']})</h1><h2>Total Packets & TCP Retransmits</h2>",
+                f"Title[{safe_name}-packets]: {resource['name']} - Total Packets",
+                f"PageTop[{safe_name}-packets]: <h1>{resource['name']} ({resource['address']})</h1><h2>Total Packets In/Out</h2>",
                 f"Options[{safe_name}-packets]: gauge,nopercent,growright",
                 f"YLegend[{safe_name}-packets]: Packets per second",
                 f"ShortLegend[{safe_name}-packets]: pps",
@@ -2726,7 +2726,27 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
                 f"",
             ])
 
-            # Target 3: System (cpu_load / memory_pct)
+            # Target 3: TCP Retransmits (tcp_retrans / tcp_retrans - same DS for both to show single line)
+            mrtg_lines.extend([
+                f"######################################################################",
+                f"# {resource['name']} - TCP Retransmits",
+                f"",
+                f"Target[{safe_name}-retransmits]: tcp_retrans&tcp_retrans:{rrd_path}",
+                f"MaxBytes[{safe_name}-retransmits]: 100000",  # 100k retrans/sec max
+                f"Title[{safe_name}-retransmits]: {resource['name']} - TCP Retransmits",
+                f"PageTop[{safe_name}-retransmits]: <h1>{resource['name']} ({resource['address']})</h1><h2>TCP Retransmits</h2>",
+                f"Options[{safe_name}-retransmits]: gauge,nopercent,growright",
+                f"YLegend[{safe_name}-retransmits]: Retransmits per second",
+                f"ShortLegend[{safe_name}-retransmits]: retrans/s",
+                f"Legend1[{safe_name}-retransmits]: TCP Retransmit Segments",
+                f"Legend2[{safe_name}-retransmits]: TCP Retransmit Segments",
+                f"LegendI[{safe_name}-retransmits]: Retrans:",
+                f"LegendO[{safe_name}-retransmits]: Retrans:",
+                f"WithPeak[{safe_name}-retransmits]: dwmy",
+                f"",
+            ])
+
+            # Target 4: System (cpu_load / memory_pct)
             mrtg_lines.extend([
                 f"######################################################################",
                 f"# {resource['name']} - CPU & Memory Utilization",
@@ -2844,13 +2864,16 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str, site_name:
                     monitor_info['title'] = pagetop_match.group(1).strip()
                     monitor_info['address'] = pagetop_match.group(2).strip()
 
-                # Check if this is an SNMP target (ends with -bandwidth, -packets, or -system)
-                if target_name.endswith('-bandwidth') or target_name.endswith('-packets') or target_name.endswith('-system'):
+                # Check if this is an SNMP target (ends with -bandwidth, -packets, -retransmits, or -system)
+                if (target_name.endswith('-bandwidth') or target_name.endswith('-packets') or
+                        target_name.endswith('-retransmits') or target_name.endswith('-system')):
                     # Extract base name (remove suffix)
                     if target_name.endswith('-bandwidth'):
                         base_name = target_name[:-10]  # Remove '-bandwidth'
                     elif target_name.endswith('-packets'):
                         base_name = target_name[:-8]  # Remove '-packets'
+                    elif target_name.endswith('-retransmits'):
+                        base_name = target_name[:-12]  # Remove '-retransmits'
                     elif target_name.endswith('-system'):
                         base_name = target_name[:-7]  # Remove '-system'
 
@@ -2880,19 +2903,19 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str, site_name:
         "        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }",
         "        h1 { color: #333; margin-bottom: 10px; }",
         "        h2 { color: #555; margin-top: 40px; margin-bottom: 20px; border-bottom: 2px solid #ddd; padding-bottom: 10px; }",
-        "        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }",
+        "        .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }",
         "        .monitor { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }",
         "        .monitor h3 { margin-top: 0; font-size: 18px; color: #555; }",
         "        .monitor a { text-decoration: none; color: inherit; }",
         "        .monitor a:hover { text-decoration: underline; }",
         "        .monitor img { max-width: 100%; height: auto; }",
         "        .network-host-label { font-size: 16px; font-weight: bold; color: #333; margin-bottom: 10px; }",
-        "        .network-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px; }",
+        "        .network-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px; }",
         "        .network-cell { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }",
         "        .network-cell h4 { margin-top: 0; font-size: 14px; color: #666; text-align: center; }",
-        "        @media (max-width: 1200px) { ",
+        "        @media (max-width: 1400px) { ",
         "            .grid { grid-template-columns: repeat(2, 1fr); }",
-        "            .network-row { grid-template-columns: 1fr; }",
+        "            .network-row { grid-template-columns: repeat(2, 1fr); }",
         "        }",
         "        @media (max-width: 768px) { ",
         "            .grid { grid-template-columns: 1fr; }",
@@ -2919,9 +2942,15 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str, site_name:
                 "            </a>",
                 "        </div>",
                 "        <div class='network-cell'>",
-                "            <h4>Total Packets / TCP Retransmits</h4>",
+                "            <h4>Total Packets In/Out</h4>",
                 f"            <a href='/mrtg-rrd/{base_name}-packets.html'>",
                 f"                <img src='/mrtg-rrd/{base_name}-packets-day.png' alt='{monitor['title']} Packets'>",
+                "            </a>",
+                "        </div>",
+                "        <div class='network-cell'>",
+                "            <h4>TCP Retransmits</h4>",
+                f"            <a href='/mrtg-rrd/{base_name}-retransmits.html'>",
+                f"                <img src='/mrtg-rrd/{base_name}-retransmits-day.png' alt='{monitor['title']} TCP Retransmits'>",
                 "            </a>",
                 "        </div>",
                 "        <div class='network-cell'>",
