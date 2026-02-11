@@ -448,20 +448,16 @@ sub do_image($$)
 
     # Add after the @local_args section, before RRDs::graph call:
     if (defined $target->{options}{dualaxis}) {
+        # Right axis for availability - scale independently
+        # Calculate scaling factor: right_max / left_max
         my $left_max = $target->{maxbytes1} || 100000;
         my $right_max = $target->{maxbytes2} || 100;
-
-        # Fix left axis to MaxBytes1 for consistent scaling
-        push @local_args, '--upper-limit', $left_max;
-        push @local_args, '--lower-limit', '0';
-        push @local_args, '--alt-autoscale-max';  # Allow scaling down if data is much smaller
-
         my $scale = $right_max / $left_max;
+
         push @local_args, '--right-axis', "$scale:0";
         push @local_args, '--right-axis-label', 'Availability %';
         push @local_args, '--right-axis-format', '%.0lf%%';
     }
-
 
 	my @rv = RRDs::graph($file, '-s', "-$back", @local_args,
 		@{$target->{args}}, "VRULE:$oldsec#ff0000",
