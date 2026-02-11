@@ -44,7 +44,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.2.5"
+__version__ = "1.2.6"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -1472,11 +1472,28 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
 
             if not os.path.exists(rrd_path):
                 create_snmp_rrd(rrd_path, check_every_n_secs, interfaces)
+                if VERBOSE:
+                    print(f"{prefix}Created SNMP RRD: {rrd_path}")
 
-            update_snmp_rrd(rrd_path, datetime.now(), interfaces, tcp_retrans)
+            if not os.path.exists(rrd_path):
+                error_msg = f"RRD creation failed: {rrd_path} does not exist after create"
+                print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
+                return error_msg
+
+            error_msg = update_snmp_rrd(rrd_path, datetime.now(), interfaces, tcp_retrans)
+            if error_msg != None:
+                return error_msg
+
+            if not os.path.exists(rrd_path):
+                error_msg = f"RRD file disappeared after update: {rrd_path}"
+                print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
+                return error_msg
 
             if VERBOSE:
                 print(f"{prefix}RRD updated: {rrd_path}")
+
+        elif VERBOSE:
+            print(f"{prefix}RRD disabled (would use: {get_rrd_path(name, 'snmp')})")
 
         # Verbose output
         if VERBOSE:
@@ -1971,9 +1988,10 @@ def create_rrd(rrd_path: str, step_secs: int) -> None:
     heartbeat = step_secs * 2
 
     # Data sources
+    # Store availability as 0-100 for natural percentage display
     data_sources = [
         f'DS:response_time:GAUGE:{heartbeat}:0:U',  # Response time in ms (0 to unlimited)
-        f'DS:is_up:GAUGE:{heartbeat}:0:1',  # Up/down status (0 or 1)
+        f'DS:is_up:GAUGE:{heartbeat}:0:100',  # Availability percentage (0 to 100)
     ]
 
     # Generate RRAs for this step interval
@@ -1992,6 +2010,40 @@ def create_rrd(rrd_path: str, step_secs: int) -> None:
             print(f"{prefix}Created RRD file: {rrd_path} (step={step_secs}s)")
     except rrdtool.OperationalError as e:
         print(f"{prefix}Failed to create RRD file '{rrd_path}': {e}", file=sys.stderr)
+
+
+def update_rrd(rrd_path: str, timestamp: datetime, response_time_ms: Optional[int], is_up: bool) -> str:
+    """Update RRD file with latest metrics.
+
+    Args:
+        rrd_path: Full path to RRD file
+        timestamp: Timestamp of the measurement
+        response_time_ms: Response time in milliseconds (or None if check failed)
+        is_up: Whether resource is up (True) or down (False)
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Convert to epoch timestamp
+    epoch = int(timestamp.timestamp())
+
+    # Format values (use 'U' for unknown if response_time is None)
+    # Store availability as 0-100 for percentage display
+    response_val = str(response_time_ms) if response_time_ms is not None else 'U'
+    is_up_val = '100' if is_up else '0'
+
+    try:
+        rrdtool.update(
+            rrd_path,
+            f'{epoch}:{response_val}:{is_up_val}'
+        )
+        if VERBOSE > 1:
+            print(f"{prefix}Updated RRD: {rrd_path} @ {epoch} response={response_val}ms is_up={is_up_val}%")
+    except rrdtool.OperationalError as e:
+        error_msg = f"Failed to update RRD file '{rrd_path}': {e}"
+        print(f"{prefix}{error_msg}", file=sys.stderr)
+        return error_msg
+
+    return None
 
 
 def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[str, Any]]) -> None:
@@ -2014,9 +2066,8 @@ def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[st
     data_sources = []
 
     for if_index, if_data in interfaces.items():
-        # Sanitize interface name for DS name (max 19 chars, alphanumeric + underscore)
-        if_name = if_data['name']
-        safe_if_name = re.sub(r'[^\w]', '_', if_name)[:15]  # Leave room for _in/_out suffix
+        # Use interface index as DS name base (guarantees uniqueness)
+        safe_if_name = f"if{if_index}"
 
         # COUNTER type for cumulative byte counters (handles wraps at 32/64-bit boundaries)
         data_sources.append(f'DS:{safe_if_name}_in:COUNTER:{heartbeat}:0:U')
@@ -2041,6 +2092,59 @@ def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[st
             print(f"{prefix}Created SNMP RRD file: {rrd_path} (step={step_secs}s, {len(interfaces)} interfaces, {len(data_sources)} data sources)")
     except rrdtool.OperationalError as e:
         print(f"{prefix}Failed to create SNMP RRD file '{rrd_path}': {e}", file=sys.stderr)
+
+
+def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Dict[str, Any]], tcp_retrans: Optional[int]) -> str:
+    """Update SNMP RRD file with latest interface metrics.
+
+    Args:
+        rrd_path: Full path to RRD file
+        timestamp: Timestamp of the measurement
+        interfaces: Dict mapping interface index to metrics (with 'in_octets', 'out_octets')
+        tcp_retrans: TCP retransmit segments counter
+    """
+    prefix = getattr(thread_local, 'prefix', '')
+
+    # Convert to epoch timestamp
+    epoch = int(timestamp.timestamp())
+
+    # Build template string (DS names in order)
+    ds_names = []
+    values = []
+
+    for if_index in sorted(interfaces.keys()):  # Stable sort for deterministic DS order
+        if_data = interfaces[if_index]
+        safe_if_name = f"if{if_index}"
+
+        ds_names.append(f'{safe_if_name}_in')
+        ds_names.append(f'{safe_if_name}_out')
+
+        in_octets = if_data.get('in_octets', 'U')
+        out_octets = if_data.get('out_octets', 'U')
+
+        values.append(str(in_octets) if in_octets != 'U' else 'U')
+        values.append(str(out_octets) if out_octets != 'U' else 'U')
+
+    # Add TCP retransmit
+    ds_names.append('tcp_retrans')
+    values.append(str(tcp_retrans) if tcp_retrans is not None else 'U')
+
+    template = ':'.join(ds_names)
+    value_str = ':'.join(values)
+
+    try:
+        rrdtool.update(
+            rrd_path,
+            '--template', template,
+            f'{epoch}:{value_str}'
+        )
+        if VERBOSE > 1:
+            print(f"{prefix}Updated SNMP RRD: {rrd_path} @ {epoch} ({len(interfaces)} interfaces)")
+    except rrdtool.OperationalError as e:
+        error_msg = "Failed to update SNMP RRD file '{rrd_path}': {e}"
+        print(f"{prefix}{error_msg}", file=sys.stderr)
+        return error_msg
+    return None
 
 
 def create_rrd_rras(step_secs: int) -> List[str]:
@@ -2088,86 +2192,6 @@ def create_rrd_rras(step_secs: int) -> List[str]:
         f'RRA:MIN:0.5:{steps_per_5min}:{rows_2days_5min}',
         f'RRA:MAX:0.5:{steps_per_5min}:{rows_2days_5min}',
     ]
-
-
-def update_rrd(rrd_path: str, timestamp: datetime, response_time_ms: Optional[int], is_up: bool) -> None:
-    """Update RRD file with latest metrics.
-
-    Args:
-        rrd_path: Full path to RRD file
-        timestamp: Timestamp of the measurement
-        response_time_ms: Response time in milliseconds (or None if check failed)
-        is_up: Whether resource is up (True) or down (False)
-    """
-    prefix = getattr(thread_local, 'prefix', '')
-
-    # Convert to epoch timestamp
-    epoch = int(timestamp.timestamp())
-
-    # Format values (use 'U' for unknown if response_time is None)
-    response_val = str(response_time_ms) if response_time_ms is not None else 'U'
-    is_up_val = '1' if is_up else '0'
-
-    try:
-        rrdtool.update(
-            rrd_path,
-            f'{epoch}:{response_val}:{is_up_val}'
-        )
-        if VERBOSE > 1:
-            print(f"{prefix}Updated RRD: {rrd_path} @ {epoch} response={response_val}ms is_up={is_up_val}")
-    except rrdtool.OperationalError as e:
-        print(f"{prefix}Failed to update RRD file '{rrd_path}': {e}", file=sys.stderr)
-
-
-def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Dict[str, Any]], tcp_retrans: Optional[int]) -> None:
-    """Update SNMP RRD file with latest interface metrics.
-
-    Args:
-        rrd_path: Full path to RRD file
-        timestamp: Timestamp of the measurement
-        interfaces: Dict mapping interface index to metrics (with 'in_octets', 'out_octets')
-        tcp_retrans: TCP retransmit segments counter
-    """
-    prefix = getattr(thread_local, 'prefix', '')
-
-    # Convert to epoch timestamp
-    epoch = int(timestamp.timestamp())
-
-    # Build template string (DS names in order)
-    ds_names = []
-    values = []
-
-    for if_index in sorted(interfaces.keys()):  # Stable sort for deterministic DS order
-        if_data = interfaces[if_index]
-        if_name = if_data['name']
-        safe_if_name = re.sub(r'[^\w]', '_', if_name)[:15]
-
-        ds_names.append(f'{safe_if_name}_in')
-        ds_names.append(f'{safe_if_name}_out')
-
-        in_octets = if_data.get('in_octets', 'U')
-        out_octets = if_data.get('out_octets', 'U')
-
-        values.append(str(in_octets) if in_octets != 'U' else 'U')
-        values.append(str(out_octets) if out_octets != 'U' else 'U')
-
-    # Add TCP retransmit
-    ds_names.append('tcp_retrans')
-    values.append(str(tcp_retrans) if tcp_retrans is not None else 'U')
-
-    template = ':'.join(ds_names)
-    value_str = ':'.join(values)
-
-    try:
-        rrdtool.update(
-            rrd_path,
-            '--template', template,
-            f'{epoch}:{value_str}'
-        )
-        if VERBOSE > 1:
-            print(f"{prefix}Updated SNMP RRD: {rrd_path} @ {epoch} ({len(interfaces)} interfaces)")
-    except rrdtool.OperationalError as e:
-        print(f"{prefix}Failed to update SNMP RRD file '{rrd_path}': {e}", file=sys.stderr)
 
 
 def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -> None:
@@ -2459,22 +2483,26 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
 
         # MRTG with LogFormat: rrdtool reads RRD files directly
         # Target points to the RRD file, data source names follow RRD DS names
+        # is_up stored as 0-100 in RRD for percentage display
+        # Order: response_time first (left axis), is_up second (right axis with dualaxis)
         mrtg_lines.extend([
             f"######################################################################",
             f"# {resource['name']} ({resource['type']})",
             f"",
             f"Target[{safe_name}]: response_time&is_up:{rrd_path}",
             f"MaxBytes[{safe_name}]: 100000",
+            f"MaxBytes1[{safe_name}]: 100000",     # Response time max (ms) - first DS
+            f"MaxBytes2[{safe_name}]: 100",        # Availability max (percentage) - second DS
             f"Title[{safe_name}]: {resource['name']} - Availability",
             f"PageTop[{safe_name}]: <h1>{resource['name']} ({resource['address']})</h1>",
-            f"Options[{safe_name}]: gauge,nopercent,growright",
+            f"Options[{safe_name}]: gauge,nopercent,growright,dualaxis",
             f"YLegend[{safe_name}]: Response Time (ms)",
-            f"ShortLegend[{safe_name}]: ms",
-            f"Legend1[{safe_name}]: Response Time",
-            f"Legend2[{safe_name}]: Availability",
-            f"LegendI[{safe_name}]: Response:",
-            f"LegendO[{safe_name}]: Up:",
-            f"WithPeak[{safe_name}]: dwmy",  # Add this line - shows peak response times
+            f"ShortLegend[{safe_name}]:",  # Empty to suppress unit suffix
+            f"Legend1[{safe_name}]: Response Time (ms)",    # First DS (response_time) = In = Green
+            f"Legend2[{safe_name}]: Availability (%)",      # Second DS (is_up) = Out = Blue
+            f"LegendI[{safe_name}]: Response:",             # In (first DS)
+            f"LegendO[{safe_name}]: Avail:",                # Out (second DS)
+            f"WithPeak[{safe_name}]: dwmy",
             f"",
         ])
 
@@ -2722,6 +2750,7 @@ def main() -> None:
     parser.add_argument('-s', '--statefile', default=get_default_statefile(), help=f'Path to state file (default: platform-dependent, see docs)')
     parser.add_argument('--test-webhooks', action='store_true', help='Test webhook notifications and exit')
     parser.add_argument('--test-emails', action='store_true', help='Test email notifications and exit')
+    parser.add_argument('--generate-rrds', action='store_true', help='Enable RRD database creation and updates')
     parser.add_argument('--generate-mrtg-config', metavar='WORKDIR', nargs='?', const='/var/www/html/mrtg', help='Generate MRTG config file and exit (default workdir: /var/www/html/mrtg)')
     args = parser.parse_args()
 
@@ -2793,6 +2822,10 @@ def main() -> None:
             print(f"MRTG working directory: {work_dir}")
             if all_config_files:
                 print(f"All MRTG config files in mrtg-rrd.cgi.pl: {', '.join(all_config_files)}")
+            RRD_ENABLED = True
+
+        # Enable RRD if requested
+        if args.generate_rrds:
             RRD_ENABLED = True
 
         if args.threads == 1 and 'max_threads' in config['site']:  # only if not overridden by command line

@@ -40,7 +40,7 @@ Ex Chief Scientist @ Clemenger BBDO / Omnicom</i>
 
 To run APMonitor with a configuration file `test-apmonitor-config.yaml ` & auto-created statefile `/tmp/statefile.json`:
 ```
- ./APMonitor.py -vv -s /tmp/statefile.json test-apmonitor-config.yaml 
+ ./APMonitor.py -vv -s /tmp/statefile.json test-apmonitor-config.yaml --generate-rrds 
 ```
 
 # Design Philosophy &amp; Provenance
@@ -1480,7 +1480,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.5
+Software: APMonitor 1.2.6
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```
