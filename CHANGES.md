@@ -9,6 +9,9 @@ Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S 
 Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
 Thread safe, reentrant, easily modifiable.
 
+# Realease 1.2.7 (???): ???
+- Fixed Y-axis limits to actually display data
+
 # Release 1.2.6 (11-Feb-26): Tuned MRTG Dualaxis
 - Added --generate-rrds command line option to force storage of SNMP data
 - Added dualaxis support to plot availability next to response time correctly
