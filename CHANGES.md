@@ -7,9 +7,14 @@ Synopsis:
 On-prem/LAN availability monitoring with realtime guarantees & decaying alert pacing. 
 Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S resources incl. SSL/TLS cert. pinning.
 Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
-Thread safe, reentrant, easily modifiable.
+Thread safe, reentrant, 
 
-# Realease 1.2.7 (???): ???
+# Release 1.2.8 (???): ???
+- Added more SNMP metrics for CPU, PPS, KBits/Sec & Memory
+- Rendered more SNMP metrics for CPU, PPS, KBits/Sec & Memory into index.html
+- Tuned layout of Network vs. Availability monitors
+
+# Realease 1.2.7 (12-Feb-26): MRTG Dualaxis Bugfix
 - Fixed Y-axis limits to actually display data
 
 # Release 1.2.6 (11-Feb-26): Tuned MRTG Dualaxis

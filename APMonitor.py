@@ -1363,7 +1363,7 @@ def check_ping_resource(resource: Dict[str, Any]) -> Optional[str]:
 
 
 def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
-    """Poll SNMP device for interface bandwidth/retransmit metrics and update RRD."""
+    """Poll SNMP device for interface bandwidth/retransmit metrics and system resources, update RRD."""
     try:
         from easysnmp import Session
     except ImportError as e:
@@ -1393,11 +1393,27 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
         print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
         return error_msg
 
-    # Standard SNMP OIDs for interface statistics
+    # Standard SNMP OIDs
     OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2'  # IF-MIB::ifDescr
     OID_IF_IN_OCTETS = '1.3.6.1.2.1.2.2.1.10'  # IF-MIB::ifInOctets
     OID_IF_OUT_OCTETS = '1.3.6.1.2.1.2.2.1.16'  # IF-MIB::ifOutOctets
     OID_TCP_RETRANS_SEGS = '1.3.6.1.2.1.6.12.0'  # TCP-MIB::tcpRetransSegs
+
+    # Interface packet counters (high-capacity 64-bit)
+    OID_IF_HC_IN_UCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.7'  # IF-MIB::ifHCInUcastPkts
+    OID_IF_HC_IN_MCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.8'  # IF-MIB::ifHCInMulticastPkts
+    OID_IF_HC_IN_BCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.9'  # IF-MIB::ifHCInBroadcastPkts
+    OID_IF_HC_OUT_UCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.11'  # IF-MIB::ifHCOutUcastPkts
+    OID_IF_HC_OUT_MCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.12'  # IF-MIB::ifHCOutMulticastPkts
+    OID_IF_HC_OUT_BCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.13'  # IF-MIB::ifHCOutBroadcastPkts
+
+    # HOST-RESOURCES-MIB for CPU and memory
+    OID_HR_PROCESSOR_LOAD = '1.3.6.1.2.1.25.3.3.1.2'  # HOST-RESOURCES-MIB::hrProcessorLoad
+    OID_HR_STORAGE_INDEX = '1.3.6.1.2.1.25.2.3.1.1'  # HOST-RESOURCES-MIB::hrStorageIndex
+    OID_HR_STORAGE_DESCR = '1.3.6.1.2.1.25.2.3.1.3'  # HOST-RESOURCES-MIB::hrStorageDescr
+    OID_HR_STORAGE_UNITS = '1.3.6.1.2.1.25.2.3.1.4'  # HOST-RESOURCES-MIB::hrStorageAllocationUnits
+    OID_HR_STORAGE_SIZE = '1.3.6.1.2.1.25.2.3.1.5'  # HOST-RESOURCES-MIB::hrStorageSize
+    OID_HR_STORAGE_USED = '1.3.6.1.2.1.25.2.3.1.6'  # HOST-RESOURCES-MIB::hrStorageUsed
 
     try:
         # Create SNMP session
@@ -1430,14 +1446,22 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
             print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
             return error_msg
 
-        # Poll I/O counters for each interface
+        # Initialize aggregate counters
+        total_octets_in = 0
+        total_octets_out = 0
+        total_pkts_in = 0
+        total_pkts_out = 0
+
+        # Poll byte counters for each interface
         for if_index in interfaces:
             # Get input octets
             try:
                 item = session.get(f"{OID_IF_IN_OCTETS}.{if_index}")
-                interfaces[if_index]['in_octets'] = int(item.value)
+                octets_in = int(item.value)
+                interfaces[if_index]['in_octets'] = octets_in
+                total_octets_in += octets_in
                 if VERBOSE:
-                    print(f"{prefix}SNMP GET {OID_IF_IN_OCTETS}.{if_index} (ifInOctets) = {interfaces[if_index]['in_octets']}")
+                    print(f"{prefix}SNMP GET {OID_IF_IN_OCTETS}.{if_index} (ifInOctets) = {octets_in}")
             except Exception as e:
                 interfaces[if_index]['in_octets'] = None
                 if VERBOSE:
@@ -1446,13 +1470,78 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
             # Get output octets
             try:
                 item = session.get(f"{OID_IF_OUT_OCTETS}.{if_index}")
-                interfaces[if_index]['out_octets'] = int(item.value)
+                octets_out = int(item.value)
+                interfaces[if_index]['out_octets'] = octets_out
+                total_octets_out += octets_out
                 if VERBOSE:
-                    print(f"{prefix}SNMP GET {OID_IF_OUT_OCTETS}.{if_index} (ifOutOctets) = {interfaces[if_index]['out_octets']}")
+                    print(f"{prefix}SNMP GET {OID_IF_OUT_OCTETS}.{if_index} (ifOutOctets) = {octets_out}")
             except Exception as e:
                 interfaces[if_index]['out_octets'] = None
                 if VERBOSE:
                     print(f"{prefix}SNMP GET {OID_IF_OUT_OCTETS}.{if_index} (ifOutOctets) FAILED: {e}")
+
+        # Poll packet counters for each interface (IF-MIB high-capacity 64-bit counters)
+        for if_index in interfaces:
+            if_pkts_in = 0
+            if_pkts_out = 0
+
+            # Input packets (unicast + multicast + broadcast)
+            try:
+                item = session.get(f"{OID_IF_HC_IN_UCAST_PKTS}.{if_index}")
+                if_pkts_in += int(item.value)
+            except Exception as e:
+                if VERBOSE > 1:
+                    print(f"{prefix}SNMP GET {OID_IF_HC_IN_UCAST_PKTS}.{if_index} (ifHCInUcastPkts) FAILED: {e}")
+
+            try:
+                item = session.get(f"{OID_IF_HC_IN_MCAST_PKTS}.{if_index}")
+                if_pkts_in += int(item.value)
+            except Exception as e:
+                if VERBOSE > 1:
+                    print(f"{prefix}SNMP GET {OID_IF_HC_IN_MCAST_PKTS}.{if_index} (ifHCInMulticastPkts) FAILED: {e}")
+
+            try:
+                item = session.get(f"{OID_IF_HC_IN_BCAST_PKTS}.{if_index}")
+                if_pkts_in += int(item.value)
+            except Exception as e:
+                if VERBOSE > 1:
+                    print(f"{prefix}SNMP GET {OID_IF_HC_IN_BCAST_PKTS}.{if_index} (ifHCInBroadcastPkts) FAILED: {e}")
+
+            # Output packets (unicast + multicast + broadcast)
+            try:
+                item = session.get(f"{OID_IF_HC_OUT_UCAST_PKTS}.{if_index}")
+                if_pkts_out += int(item.value)
+            except Exception as e:
+                if VERBOSE > 1:
+                    print(f"{prefix}SNMP GET {OID_IF_HC_OUT_UCAST_PKTS}.{if_index} (ifHCOutUcastPkts) FAILED: {e}")
+
+            try:
+                item = session.get(f"{OID_IF_HC_OUT_MCAST_PKTS}.{if_index}")
+                if_pkts_out += int(item.value)
+            except Exception as e:
+                if VERBOSE > 1:
+                    print(f"{prefix}SNMP GET {OID_IF_HC_OUT_MCAST_PKTS}.{if_index} (ifHCOutMulticastPkts) FAILED: {e}")
+
+            try:
+                item = session.get(f"{OID_IF_HC_OUT_BCAST_PKTS}.{if_index}")
+                if_pkts_out += int(item.value)
+            except Exception as e:
+                if VERBOSE > 1:
+                    print(f"{prefix}SNMP GET {OID_IF_HC_OUT_BCAST_PKTS}.{if_index} (ifHCOutBroadcastPkts) FAILED: {e}")
+
+            # Aggregate totals
+            total_pkts_in += if_pkts_in
+            total_pkts_out += if_pkts_out
+
+            if VERBOSE:
+                print(f"{prefix}Interface {if_index} packets: in={if_pkts_in:,} out={if_pkts_out:,}")
+
+        # Convert octets to bits for total_bits metrics (1 byte = 8 bits)
+        total_bits_in = total_octets_in * 8
+        total_bits_out = total_octets_out * 8
+
+        if VERBOSE:
+            print(f"{prefix}Aggregate totals: bits_in={total_bits_in:,} bits_out={total_bits_out:,} pkts_in={total_pkts_in:,} pkts_out={total_pkts_out:,}")
 
         # Get TCP retransmit segments (global counter)
         tcp_retrans = None
@@ -1464,6 +1553,69 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
         except Exception as e:
             if VERBOSE:
                 print(f"{prefix}SNMP GET {OID_TCP_RETRANS_SEGS} (tcpRetransSegs) FAILED: {e}")
+
+        # Poll CPU utilization (HOST-RESOURCES-MIB)
+        cpu_load = None
+        try:
+            cpu_items = session.walk(OID_HR_PROCESSOR_LOAD)
+            if cpu_items:
+                # Average all CPU cores
+                cpu_values = [int(item.value) for item in cpu_items]
+                cpu_load = sum(cpu_values) / len(cpu_values)
+                if VERBOSE:
+                    print(f"{prefix}SNMP CPU load: {len(cpu_values)} cores, average={cpu_load:.1f}%")
+            else:
+                if VERBOSE:
+                    print(f"{prefix}SNMP CPU load: no processors found (HOST-RESOURCES-MIB may not be supported)")
+        except Exception as e:
+            if VERBOSE:
+                print(f"{prefix}SNMP GET hrProcessorLoad FAILED: {e} (device may not support HOST-RESOURCES-MIB)")
+
+        # Poll memory utilization (HOST-RESOURCES-MIB)
+        memory_pct = None
+        try:
+            storage_items = session.walk(OID_HR_STORAGE_DESCR)
+
+            # Find physical memory entry (description contains "memory" or "RAM")
+            memory_index = None
+            for item in storage_items:
+                descr = item.value.lower()
+                if 'physical memory' in descr or 'ram' in descr or descr == 'memory':
+                    memory_index = item.oid.split('.')[-1]
+                    if VERBOSE:
+                        print(f"{prefix}Found memory storage entry: index={memory_index} descr='{item.value}'")
+                    break
+
+            if memory_index:
+                # Get allocation units (bytes per unit)
+                units_item = session.get(f"{OID_HR_STORAGE_UNITS}.{memory_index}")
+                units = int(units_item.value)
+
+                # Get total size (in allocation units)
+                size_item = session.get(f"{OID_HR_STORAGE_SIZE}.{memory_index}")
+                size = int(size_item.value)
+
+                # Get used size (in allocation units)
+                used_item = session.get(f"{OID_HR_STORAGE_USED}.{memory_index}")
+                used = int(used_item.value)
+
+                # Calculate percentage
+                if size > 0:
+                    memory_pct = (used / size) * 100.0
+
+                    if VERBOSE:
+                        memory_total_bytes = size * units
+                        memory_used_bytes = used * units
+                        print(f"{prefix}SNMP memory: used={memory_used_bytes:,} total={memory_total_bytes:,} ({memory_pct:.1f}%)")
+                else:
+                    if VERBOSE:
+                        print(f"{prefix}SNMP memory: size=0, cannot calculate percentage")
+            else:
+                if VERBOSE:
+                    print(f"{prefix}SNMP memory: no physical memory entry found in hrStorage table")
+        except Exception as e:
+            if VERBOSE:
+                print(f"{prefix}SNMP GET hrStorage FAILED: {e} (device may not support HOST-RESOURCES-MIB)")
 
         # Update RRD database if enabled
         if RRD_ENABLED:
@@ -1480,7 +1632,9 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
                 print(f"{prefix}SNMP check FAILED for '{name}': {error_msg}", file=sys.stderr)
                 return error_msg
 
-            error_msg = update_snmp_rrd(rrd_path, datetime.now(), interfaces, tcp_retrans)
+            error_msg = update_snmp_rrd(rrd_path, datetime.now(), interfaces, tcp_retrans,
+                                        total_bits_in, total_bits_out, total_pkts_in, total_pkts_out,
+                                        cpu_load, memory_pct)
             if error_msg != None:
                 return error_msg
 
@@ -1497,7 +1651,15 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
 
         # Verbose output
         if VERBOSE:
-            print(f"{prefix}SNMP poll SUCCESS for '{name}': {len(interfaces)} interfaces, tcp_retrans={tcp_retrans}")
+            summary_parts = [f"{len(interfaces)} interfaces"]
+            if tcp_retrans is not None:
+                summary_parts.append(f"tcp_retrans={tcp_retrans}")
+            if cpu_load is not None:
+                summary_parts.append(f"cpu={cpu_load:.1f}%")
+            if memory_pct is not None:
+                summary_parts.append(f"memory={memory_pct:.1f}%")
+
+            print(f"{prefix}SNMP poll SUCCESS for '{name}': {', '.join(summary_parts)}")
             for if_index in sorted(interfaces.keys()):
                 if_data = interfaces[if_index]
                 in_octets = if_data.get('in_octets', 'N/A')
@@ -2047,7 +2209,7 @@ def update_rrd(rrd_path: str, timestamp: datetime, response_time_ms: Optional[in
 
 
 def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[str, Any]]) -> None:
-    """Create RRD file for SNMP interface metrics.
+    """Create RRD file for SNMP interface metrics and system resources.
 
     Args:
         rrd_path: Full path to RRD file to create
@@ -2076,6 +2238,16 @@ def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[st
     # Add TCP retransmit counter
     data_sources.append(f'DS:tcp_retrans:COUNTER:{heartbeat}:0:U')
 
+    # Add aggregate interface metrics (COUNTER for cumulative values)
+    data_sources.append(f'DS:total_bits_in:COUNTER:{heartbeat}:0:U')
+    data_sources.append(f'DS:total_bits_out:COUNTER:{heartbeat}:0:U')
+    data_sources.append(f'DS:total_pkts_in:COUNTER:{heartbeat}:0:U')
+    data_sources.append(f'DS:total_pkts_out:COUNTER:{heartbeat}:0:U')
+
+    # Add system resource metrics (GAUGE for instantaneous values)
+    data_sources.append(f'DS:cpu_load:GAUGE:{heartbeat}:0:100')  # Percentage 0-100
+    data_sources.append(f'DS:memory_pct:GAUGE:{heartbeat}:0:100')  # Percentage 0-100
+
     # Generate RRAs
     rras = create_rrd_rras(step_secs)
 
@@ -2094,14 +2266,23 @@ def create_snmp_rrd(rrd_path: str, step_secs: int, interfaces: Dict[str, Dict[st
         print(f"{prefix}Failed to create SNMP RRD file '{rrd_path}': {e}", file=sys.stderr)
 
 
-def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Dict[str, Any]], tcp_retrans: Optional[int]) -> str:
-    """Update SNMP RRD file with latest interface metrics.
+def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Dict[str, Any]],
+                    tcp_retrans: Optional[int], total_bits_in: int, total_bits_out: int,
+                    total_pkts_in: int, total_pkts_out: int, cpu_load: Optional[float],
+                    memory_pct: Optional[float]) -> Optional[str]:
+    """Update SNMP RRD file with latest interface metrics and system resources.
 
     Args:
         rrd_path: Full path to RRD file
         timestamp: Timestamp of the measurement
         interfaces: Dict mapping interface index to metrics (with 'in_octets', 'out_octets')
         tcp_retrans: TCP retransmit segments counter
+        total_bits_in: Aggregate inbound bits across all interfaces
+        total_bits_out: Aggregate outbound bits across all interfaces
+        total_pkts_in: Aggregate inbound packets across all interfaces
+        total_pkts_out: Aggregate outbound packets across all interfaces
+        cpu_load: Average CPU utilization percentage (0-100)
+        memory_pct: Memory utilization percentage (0-100)
     """
     prefix = getattr(thread_local, 'prefix', '')
 
@@ -2119,15 +2300,35 @@ def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Di
         ds_names.append(f'{safe_if_name}_in')
         ds_names.append(f'{safe_if_name}_out')
 
-        in_octets = if_data.get('in_octets', 'U')
-        out_octets = if_data.get('out_octets', 'U')
+        in_octets = if_data.get('in_octets')
+        out_octets = if_data.get('out_octets')
 
-        values.append(str(in_octets) if in_octets != 'U' else 'U')
-        values.append(str(out_octets) if out_octets != 'U' else 'U')
+        values.append(str(in_octets) if in_octets is not None else 'U')
+        values.append(str(out_octets) if out_octets is not None else 'U')
 
     # Add TCP retransmit
     ds_names.append('tcp_retrans')
     values.append(str(tcp_retrans) if tcp_retrans is not None else 'U')
+
+    # Add aggregate metrics
+    ds_names.append('total_bits_in')
+    values.append(str(total_bits_in))
+
+    ds_names.append('total_bits_out')
+    values.append(str(total_bits_out))
+
+    ds_names.append('total_pkts_in')
+    values.append(str(total_pkts_in))
+
+    ds_names.append('total_pkts_out')
+    values.append(str(total_pkts_out))
+
+    # Add system resources
+    ds_names.append('cpu_load')
+    values.append(f'{cpu_load:.2f}' if cpu_load is not None else 'U')
+
+    ds_names.append('memory_pct')
+    values.append(f'{memory_pct:.2f}' if memory_pct is not None else 'U')
 
     template = ':'.join(ds_names)
     value_str = ':'.join(values)
@@ -2139,9 +2340,9 @@ def update_snmp_rrd(rrd_path: str, timestamp: datetime, interfaces: Dict[str, Di
             f'{epoch}:{value_str}'
         )
         if VERBOSE > 1:
-            print(f"{prefix}Updated SNMP RRD: {rrd_path} @ {epoch} ({len(interfaces)} interfaces)")
+            print(f"{prefix}Updated SNMP RRD: {rrd_path} @ {epoch} ({len(interfaces)} interfaces, aggregates, system)")
     except rrdtool.OperationalError as e:
-        error_msg = "Failed to update SNMP RRD file '{rrd_path}': {e}"
+        error_msg = f"Failed to update SNMP RRD file '{rrd_path}': {e}"
         print(f"{prefix}{error_msg}", file=sys.stderr)
         return error_msg
     return None
@@ -2479,32 +2680,100 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
 
     for resource in config['monitors']:
         safe_name = re.sub(r'[^\w\-.]', '_', resource['name'])
-        rrd_path = get_rrd_path(resource['name'])
+        monitor_type = resource['type']
 
-        # MRTG with LogFormat: rrdtool reads RRD files directly
-        # Target points to the RRD file, data source names follow RRD DS names
-        # is_up stored as 0-100 in RRD for percentage display
-        # Order: response_time first (left axis), is_up second (right axis with dualaxis)
-        mrtg_lines.extend([
-            f"######################################################################",
-            f"# {resource['name']} ({resource['type']})",
-            f"",
-            f"Target[{safe_name}]: response_time&is_up:{rrd_path}",
-            f"MaxBytes[{safe_name}]: 100000",
-            f"MaxBytes1[{safe_name}]: 100000",     # Response time max (ms) - first DS
-            f"MaxBytes2[{safe_name}]: 100",        # Availability max (percentage) - second DS
-            f"Title[{safe_name}]: {resource['name']} - Availability",
-            f"PageTop[{safe_name}]: <h1>{resource['name']} ({resource['address']})</h1>",
-            f"Options[{safe_name}]: gauge,nopercent,growright,dualaxis",
-            f"YLegend[{safe_name}]: Response Time (ms)",
-            f"ShortLegend[{safe_name}]:",  # Empty to suppress unit suffix
-            f"Legend1[{safe_name}]: Response Time (ms)",    # First DS (response_time) = In = Green
-            f"Legend2[{safe_name}]: Availability (%)",      # Second DS (is_up) = Out = Blue
-            f"LegendI[{safe_name}]: Response:",             # In (first DS)
-            f"LegendO[{safe_name}]: Avail:",                # Out (second DS)
-            f"WithPeak[{safe_name}]: dwmy",
-            f"",
-        ])
+        if monitor_type == 'snmp':
+            # SNMP monitors get three separate targets
+            rrd_path = get_rrd_path(resource['name'], 'snmp')
+
+            # Target 1: Bandwidth (total_bits_in / total_bits_out)
+            mrtg_lines.extend([
+                f"######################################################################",
+                f"# {resource['name']} - Total Bandwidth",
+                f"",
+                f"Target[{safe_name}-bandwidth]: total_bits_in&total_bits_out:{rrd_path}",
+                f"MaxBytes[{safe_name}-bandwidth]: 10000000000",  # 10 Gbps max
+                f"Title[{safe_name}-bandwidth]: {resource['name']} - Total Bandwidth",
+                f"PageTop[{safe_name}-bandwidth]: <h1>{resource['name']} ({resource['address']})</h1><h2>Total Bandwidth In/Out</h2>",
+                f"Options[{safe_name}-bandwidth]: gauge,nopercent,growright,bits",
+                f"YLegend[{safe_name}-bandwidth]: Bits per second",
+                f"ShortLegend[{safe_name}-bandwidth]: b/s",
+                f"Legend1[{safe_name}-bandwidth]: Total Inbound Traffic",
+                f"Legend2[{safe_name}-bandwidth]: Total Outbound Traffic",
+                f"LegendI[{safe_name}-bandwidth]: In:",
+                f"LegendO[{safe_name}-bandwidth]: Out:",
+                f"WithPeak[{safe_name}-bandwidth]: dwmy",
+                f"",
+            ])
+
+            # Target 2: Packets (total_pkts_in / total_pkts_out, with tcp_retrans overlay)
+            mrtg_lines.extend([
+                f"######################################################################",
+                f"# {resource['name']} - Total Packets & TCP Retransmits",
+                f"",
+                f"Target[{safe_name}-packets]: total_pkts_in&total_pkts_out:{rrd_path}",
+                f"MaxBytes[{safe_name}-packets]: 10000000",  # 10M pps max
+                f"Title[{safe_name}-packets]: {resource['name']} - Packets & Retransmits",
+                f"PageTop[{safe_name}-packets]: <h1>{resource['name']} ({resource['address']})</h1><h2>Total Packets & TCP Retransmits</h2>",
+                f"Options[{safe_name}-packets]: gauge,nopercent,growright",
+                f"YLegend[{safe_name}-packets]: Packets per second",
+                f"ShortLegend[{safe_name}-packets]: pps",
+                f"Legend1[{safe_name}-packets]: Total Inbound Packets",
+                f"Legend2[{safe_name}-packets]: Total Outbound Packets",
+                f"LegendI[{safe_name}-packets]: In:",
+                f"LegendO[{safe_name}-packets]: Out:",
+                f"WithPeak[{safe_name}-packets]: dwmy",
+                f"",
+            ])
+
+            # Target 3: System (cpu_load / memory_pct)
+            mrtg_lines.extend([
+                f"######################################################################",
+                f"# {resource['name']} - CPU & Memory Utilization",
+                f"",
+                f"Target[{safe_name}-system]: cpu_load&memory_pct:{rrd_path}",
+                f"MaxBytes[{safe_name}-system]: 100",  # Percentage 0-100
+                f"Title[{safe_name}-system]: {resource['name']} - System Resources",
+                f"PageTop[{safe_name}-system]: <h1>{resource['name']} ({resource['address']})</h1><h2>CPU & Memory Utilization</h2>",
+                f"Options[{safe_name}-system]: gauge,nopercent,growright",
+                f"YLegend[{safe_name}-system]: Utilization %",
+                f"ShortLegend[{safe_name}-system]: %",
+                f"Legend1[{safe_name}-system]: CPU Load Average",
+                f"Legend2[{safe_name}-system]: Memory Utilization",
+                f"LegendI[{safe_name}-system]: CPU:",
+                f"LegendO[{safe_name}-system]: Memory:",
+                f"WithPeak[{safe_name}-system]: dwmy",
+                f"",
+            ])
+
+        else:
+            # Non-SNMP monitors (ping, http, quic, tcp, udp) - availability tracking
+            rrd_path = get_rrd_path(resource['name'])
+
+            # MRTG with LogFormat: rrdtool reads RRD files directly
+            # Target points to the RRD file, data source names follow RRD DS names
+            # is_up stored as 0-100 in RRD for percentage display
+            # Order: response_time first (left axis), is_up second (right axis with dualaxis)
+            mrtg_lines.extend([
+                f"######################################################################",
+                f"# {resource['name']} ({resource['type']})",
+                f"",
+                f"Target[{safe_name}]: response_time&is_up:{rrd_path}",
+                f"MaxBytes[{safe_name}]: 100000",
+                f"MaxBytes1[{safe_name}]: 100000",  # Response time max (ms) - first DS
+                f"MaxBytes2[{safe_name}]: 100",  # Availability max (percentage) - second DS
+                f"Title[{safe_name}]: {resource['name']} - Availability",
+                f"PageTop[{safe_name}]: <h1>{resource['name']} ({resource['address']})</h1>",
+                f"Options[{safe_name}]: gauge,nopercent,growright,dualaxis",
+                f"YLegend[{safe_name}]: Response Time (ms)",
+                f"ShortLegend[{safe_name}]:",  # Empty to suppress unit suffix
+                f"Legend1[{safe_name}]: Response Time (ms)",  # First DS (response_time) = In = Green
+                f"Legend2[{safe_name}]: Availability (%)",  # Second DS (is_up) = Out = Blue
+                f"LegendI[{safe_name}]: Response:",  # In (first DS)
+                f"LegendO[{safe_name}]: Avail:",  # Out (second DS)
+                f"WithPeak[{safe_name}]: dwmy",
+                f"",
+            ])
 
     config_content = "\n".join(mrtg_lines)
 
@@ -2530,18 +2799,19 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
         print(f"{prefix}Failed to generate MRTG config '{mrtg_config_path}': {e}", file=sys.stderr)
 
 
-def generate_mrtg_index(all_config_files: List[str], index_path: str) -> None:
-    """Generate index.html with 3-column grid of monitor charts from all MRTG configs using atomic file rotation.
+def generate_mrtg_index(all_config_files: List[str], index_path: str, site_name: str = "Availability Monitoring") -> None:
+    """Generate index.html with Network Monitoring (SNMP) and Availability Monitoring sections using atomic file rotation.
 
     Args:
         all_config_files: List of paths to MRTG config files
         index_path: Full path to index.html file to create (will use .new/.old rotation)
+        site_name: Site name for page heading (from APMonitor config)
     """
     prefix = getattr(thread_local, 'prefix', '')
 
     # Collect all monitors from all config files
     all_monitors = []
-    site_name = "Network Monitoring"  # Default site name
+    snmp_monitors = {}  # Dict to deduplicate SNMP monitors by base name
 
     for config_file in all_config_files:
         if not os.path.exists(config_file):
@@ -2553,12 +2823,6 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str) -> None:
             # Parse MRTG config to extract targets
             with open(config_file, 'r') as f:
                 content = f.read()
-
-            # Extract site name from first config file (if present in comments)
-            if not all_monitors:  # Only from first file
-                site_match = re.search(r'#.*Site:\s*(.+)', content)
-                if site_match:
-                    site_name = site_match.group(1).strip()
 
             # Find all Target[name]: entries
             target_pattern = r'Target\[([^\]]+)\]:'
@@ -2580,13 +2844,28 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str) -> None:
                     monitor_info['title'] = pagetop_match.group(1).strip()
                     monitor_info['address'] = pagetop_match.group(2).strip()
 
-                all_monitors.append(monitor_info)
+                # Check if this is an SNMP target (ends with -bandwidth, -packets, or -system)
+                if target_name.endswith('-bandwidth') or target_name.endswith('-packets') or target_name.endswith('-system'):
+                    # Extract base name (remove suffix)
+                    if target_name.endswith('-bandwidth'):
+                        base_name = target_name[:-10]  # Remove '-bandwidth'
+                    elif target_name.endswith('-packets'):
+                        base_name = target_name[:-8]  # Remove '-packets'
+                    elif target_name.endswith('-system'):
+                        base_name = target_name[:-7]  # Remove '-system'
+
+                    # Store only once per base name (deduplicate)
+                    if base_name not in snmp_monitors:
+                        snmp_monitors[base_name] = monitor_info
+                else:
+                    # Regular availability monitor
+                    all_monitors.append(monitor_info)
 
         except Exception as e:
             print(f"{prefix}Warning: Failed to parse config file '{config_file}': {e}", file=sys.stderr)
             continue
 
-    if not all_monitors:
+    if not all_monitors and not snmp_monitors:
         print(f"{prefix}Warning: No monitors found in any config files", file=sys.stderr)
         return
 
@@ -2599,38 +2878,85 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str) -> None:
         f"    <title>{site_name}</title>",
         "    <style>",
         "        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }",
-        "        h1 { color: #333; }",
+        "        h1 { color: #333; margin-bottom: 10px; }",
+        "        h2 { color: #555; margin-top: 40px; margin-bottom: 20px; border-bottom: 2px solid #ddd; padding-bottom: 10px; }",
         "        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }",
         "        .monitor { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }",
-        "        .monitor h2 { margin-top: 0; font-size: 18px; color: #555; }",
+        "        .monitor h3 { margin-top: 0; font-size: 18px; color: #555; }",
         "        .monitor a { text-decoration: none; color: inherit; }",
         "        .monitor a:hover { text-decoration: underline; }",
         "        .monitor img { max-width: 100%; height: auto; }",
-        "        @media (max-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }",
-        "        @media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }",
+        "        .network-host-label { font-size: 16px; font-weight: bold; color: #333; margin-bottom: 10px; }",
+        "        .network-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px; }",
+        "        .network-cell { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }",
+        "        .network-cell h4 { margin-top: 0; font-size: 14px; color: #666; text-align: center; }",
+        "        @media (max-width: 1200px) { ",
+        "            .grid { grid-template-columns: repeat(2, 1fr); }",
+        "            .network-row { grid-template-columns: 1fr; }",
+        "        }",
+        "        @media (max-width: 768px) { ",
+        "            .grid { grid-template-columns: 1fr; }",
+        "            .network-row { grid-template-columns: 1fr; }",
+        "        }",
         "    </style>",
         "</head>",
         "<body>",
         f"    <h1>{site_name}</h1>",
-        "    <div class='grid'>",
     ]
 
-    # Add each monitor as a grid item
-    for monitor in all_monitors:
-        safe_name = monitor['name']
+    # Add Network Monitoring section (SNMP monitors)
+    if snmp_monitors:
+        html_lines.append("    <h2>Network Monitoring</h2>")
 
+        for base_name, monitor in sorted(snmp_monitors.items()):
+            html_lines.extend([
+                f"    <div class='network-host-label'>{monitor['title']}</div>",
+                "    <div class='network-row'>",
+                "        <div class='network-cell'>",
+                "            <h4>Total Bandwidth In/Out</h4>",
+                f"            <a href='/mrtg-rrd/{base_name}-bandwidth.html'>",
+                f"                <img src='/mrtg-rrd/{base_name}-bandwidth-day.png' alt='{monitor['title']} Bandwidth'>",
+                "            </a>",
+                "        </div>",
+                "        <div class='network-cell'>",
+                "            <h4>Total Packets / TCP Retransmits</h4>",
+                f"            <a href='/mrtg-rrd/{base_name}-packets.html'>",
+                f"                <img src='/mrtg-rrd/{base_name}-packets-day.png' alt='{monitor['title']} Packets'>",
+                "            </a>",
+                "        </div>",
+                "        <div class='network-cell'>",
+                "            <h4>CPU & Memory</h4>",
+                f"            <a href='/mrtg-rrd/{base_name}-system.html'>",
+                f"                <img src='/mrtg-rrd/{base_name}-system-day.png' alt='{monitor['title']} System'>",
+                "            </a>",
+                "        </div>",
+                "    </div>",
+            ])
+
+    # Add Availability Monitoring section (non-SNMP monitors)
+    if all_monitors:
         html_lines.extend([
-            "        <div class='monitor'>",
-            f"            <h2><a href='/mrtg-rrd/{safe_name}.html'>{monitor['title']}</a></h2>",
-            f"            <a href='/mrtg-rrd/{safe_name}.html'>",
-            f"                <img src='/mrtg-rrd/{safe_name}-day.png' alt='{monitor['title']} Daily Graph'>",
-            "            </a>",
-            f"            <p style='font-size: 12px; color: #666;'>{monitor['address']}</p>",
-            "        </div>",
+            "    <h2>Availability Monitoring</h2>",
+            "    <div class='grid'>",
         ])
 
+        # Add each monitor as a grid item
+        for monitor in all_monitors:
+            safe_name = monitor['name']
+
+            html_lines.extend([
+                "        <div class='monitor'>",
+                f"            <h3><a href='/mrtg-rrd/{safe_name}.html'>{monitor['title']}</a></h3>",
+                f"            <a href='/mrtg-rrd/{safe_name}.html'>",
+                f"                <img src='/mrtg-rrd/{safe_name}-day.png' alt='{monitor['title']} Daily Graph'>",
+                "            </a>",
+                f"            <p style='font-size: 12px; color: #666;'>{monitor['address']}</p>",
+                "        </div>",
+            ])
+
+        html_lines.append("    </div>")
+
     html_lines.extend([
-        "    </div>",
         f"    <p style='margin-top: 40px; text-align: center; color: #888; font-size: 12px;'>Generated by APMonitor v{__version__} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>",
         "</body>",
         "</html>",
@@ -2654,7 +2980,9 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str) -> None:
         os.replace(new_path, current_path)
 
         if VERBOSE:
-            print(f"{prefix}Generated MRTG master index: {index_path} ({len(all_monitors)} monitors)")
+            snmp_count = len(snmp_monitors)
+            avail_count = len(all_monitors)
+            print(f"{prefix}Generated MRTG master index: {index_path} ({snmp_count} SNMP hosts, {avail_count} availability monitors)")
 
     except Exception as e:
         print(f"{prefix}Failed to generate MRTG master index '{index_path}': {e}", file=sys.stderr)
@@ -2810,12 +3138,15 @@ def main() -> None:
             work_dir = args.generate_mrtg_config
             mrtg_config_path = str(Path(STATEFILE).with_suffix('.mrtg.cfg'))
 
+            # Extract site name from config
+            site_name = config['site']['name']
+
             generate_mrtg_config(config, work_dir, mrtg_config_path)
             all_config_files = update_mrtg_rrd_cgi_config(work_dir, mrtg_config_path)
 
-            # Generate master index from all config files
+            # Generate master index from all config files, passing site name
             master_index_path = str(Path(work_dir) / 'index.html')
-            generate_mrtg_index(all_config_files, master_index_path)
+            generate_mrtg_index(all_config_files, master_index_path, site_name)
 
             print(f"MRTG config generated at: {mrtg_config_path}")
             print(f"MRTG master index generated at: {master_index_path}")
@@ -2908,6 +3239,10 @@ def main() -> None:
         # Remove lockfile on exit
         if lockfile_path and os.path.exists(lockfile_path):
             os.remove(lockfile_path)
+
+
+if __name__ == '__main__':
+    main()
 
 
 if __name__ == '__main__':
