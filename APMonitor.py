@@ -1394,6 +1394,7 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
         return error_msg
 
     # Standard SNMP OIDs
+    OID_SYS_OBJECT_ID = '1.3.6.1.2.1.1.2.0'  # SNMPv2-MIB::sysObjectID
     OID_IF_DESCR = '1.3.6.1.2.1.2.2.1.2'  # IF-MIB::ifDescr
     OID_IF_IN_OCTETS = '1.3.6.1.2.1.2.2.1.10'  # IF-MIB::ifInOctets
     OID_IF_OUT_OCTETS = '1.3.6.1.2.1.2.2.1.16'  # IF-MIB::ifOutOctets
@@ -1407,13 +1408,29 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
     OID_IF_HC_OUT_MCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.12'  # IF-MIB::ifHCOutMulticastPkts
     OID_IF_HC_OUT_BCAST_PKTS = '1.3.6.1.2.1.31.1.1.1.13'  # IF-MIB::ifHCOutBroadcastPkts
 
-    # HOST-RESOURCES-MIB for CPU and memory
+    # HOST-RESOURCES-MIB for CPU and memory (fallback)
     OID_HR_PROCESSOR_LOAD = '1.3.6.1.2.1.25.3.3.1.2'  # HOST-RESOURCES-MIB::hrProcessorLoad
     OID_HR_STORAGE_INDEX = '1.3.6.1.2.1.25.2.3.1.1'  # HOST-RESOURCES-MIB::hrStorageIndex
     OID_HR_STORAGE_DESCR = '1.3.6.1.2.1.25.2.3.1.3'  # HOST-RESOURCES-MIB::hrStorageDescr
     OID_HR_STORAGE_UNITS = '1.3.6.1.2.1.25.2.3.1.4'  # HOST-RESOURCES-MIB::hrStorageAllocationUnits
     OID_HR_STORAGE_SIZE = '1.3.6.1.2.1.25.2.3.1.5'  # HOST-RESOURCES-MIB::hrStorageSize
     OID_HR_STORAGE_USED = '1.3.6.1.2.1.25.2.3.1.6'  # HOST-RESOURCES-MIB::hrStorageUsed
+
+    # Vendor-specific OIDs for CPU
+    OID_CISCO_CPU_5SEC = '1.3.6.1.4.1.9.9.109.1.1.1.1.7.1'  # CISCO-PROCESS-MIB::cpmCPUTotal5secRev
+    OID_CISCO_CPU_1MIN = '1.3.6.1.4.1.9.9.109.1.1.1.1.5.1'  # CISCO-PROCESS-MIB::cpmCPUTotal1minRev
+    OID_HP_CPU_LOAD = '1.3.6.1.4.1.11.2.14.11.5.1.9.6.1.0'  # HP-ICF-CHASSIS::hpSwitchCpuStat
+    OID_JUNIPER_CPU = '1.3.6.1.4.1.2636.3.1.13.1.8.9.1.0.0'  # JUNIPER-MIB::jnxOperatingCPU (RE0)
+    OID_UBNT_SYS_CPU = '1.3.6.1.4.1.41112.1.4.1.2.1.0'  # UBNT-MIB::ubntSystemCpuLoad
+
+    # Vendor-specific OIDs for memory
+    OID_CISCO_MEM_POOL_USED = '1.3.6.1.4.1.9.9.48.1.1.1.5.1'  # CISCO-MEMORY-POOL-MIB::ciscoMemoryPoolUsed
+    OID_CISCO_MEM_POOL_FREE = '1.3.6.1.4.1.9.9.48.1.1.1.6.1'  # CISCO-MEMORY-POOL-MIB::ciscoMemoryPoolFree
+    OID_HP_MEM_TOTAL = '1.3.6.1.4.1.11.2.14.11.5.1.1.2.1.1.1.5.1'  # HP-ICF-CHASSIS::hpLocalMemTotalBytes
+    OID_HP_MEM_FREE = '1.3.6.1.4.1.11.2.14.11.5.1.1.2.1.1.1.6.1'  # HP-ICF-CHASSIS::hpLocalMemFreeBytes
+    OID_JUNIPER_MEM_UTIL = '1.3.6.1.4.1.2636.3.1.13.1.11.9.1.0.0'  # JUNIPER-MIB::jnxOperatingBuffer (RE0)
+    OID_UBNT_SYS_MEM_TOTAL = '1.3.6.1.4.1.41112.1.4.1.2.2.0'  # UBNT-MIB::ubntSystemMemTotal
+    OID_UBNT_SYS_MEM_FREE = '1.3.6.1.4.1.41112.1.4.1.2.3.0'  # UBNT-MIB::ubntSystemMemFree
 
     try:
         # Create SNMP session
@@ -1425,6 +1442,31 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
             timeout=MAX_TRY_SECS,
             retries=MAX_RETRIES - 1
         )
+
+        # Detect vendor via sysObjectID
+        vendor = None
+        try:
+            sys_obj_id_item = session.get(OID_SYS_OBJECT_ID)
+            sys_obj_id = sys_obj_id_item.value
+
+            if VERBOSE > 1:
+                print(f"{prefix}SNMP sysObjectID: {sys_obj_id}")
+
+            # Vendor detection based on enterprise OID prefix
+            if sys_obj_id.startswith('1.3.6.1.4.1.9.'):
+                vendor = 'cisco'
+            elif sys_obj_id.startswith('1.3.6.1.4.1.11.'):
+                vendor = 'hp'
+            elif sys_obj_id.startswith('1.3.6.1.4.1.2636.'):
+                vendor = 'juniper'
+            elif sys_obj_id.startswith('1.3.6.1.4.1.41112.'):
+                vendor = 'ubiquiti'
+
+            if VERBOSE and vendor:
+                print(f"{prefix}Detected vendor: {vendor}")
+        except Exception as e:
+            if VERBOSE > 1:
+                print(f"{prefix}SNMP sysObjectID query failed: {e}, will use HOST-RESOURCES-MIB")
 
         # Walk interface table to discover all interfaces
         interfaces = {}
@@ -1554,68 +1596,182 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
             if VERBOSE:
                 print(f"{prefix}SNMP GET {OID_TCP_RETRANS_SEGS} (tcpRetransSegs) FAILED: {e}")
 
-        # Poll CPU utilization (HOST-RESOURCES-MIB)
+        # Poll CPU utilization (vendor-specific with HOST-RESOURCES-MIB fallback)
         cpu_load = None
-        try:
-            cpu_items = session.walk(OID_HR_PROCESSOR_LOAD)
-            if cpu_items:
-                # Average all CPU cores
-                cpu_values = [int(item.value) for item in cpu_items]
-                cpu_load = sum(cpu_values) / len(cpu_values)
+
+        # Try vendor-specific OIDs first
+        if vendor == 'cisco':
+            try:
+                item = session.get(OID_CISCO_CPU_5SEC)
+                cpu_load = float(item.value)
                 if VERBOSE:
-                    print(f"{prefix}SNMP CPU load: {len(cpu_values)} cores, average={cpu_load:.1f}%")
-            else:
+                    print(f"{prefix}SNMP CPU (Cisco 5-sec): {cpu_load:.1f}%")
+            except Exception as e:
                 if VERBOSE:
-                    print(f"{prefix}SNMP CPU load: no processors found (HOST-RESOURCES-MIB may not be supported)")
-        except Exception as e:
-            if VERBOSE:
-                print(f"{prefix}SNMP GET hrProcessorLoad FAILED: {e} (device may not support HOST-RESOURCES-MIB)")
-
-        # Poll memory utilization (HOST-RESOURCES-MIB)
-        memory_pct = None
-        try:
-            storage_items = session.walk(OID_HR_STORAGE_DESCR)
-
-            # Find physical memory entry (description contains "memory" or "RAM")
-            memory_index = None
-            for item in storage_items:
-                descr = item.value.lower()
-                if 'physical memory' in descr or 'ram' in descr or descr == 'memory':
-                    memory_index = item.oid.split('.')[-1]
+                    print(f"{prefix}SNMP GET Cisco CPU 5-sec FAILED: {e}, trying 1-min average")
+                try:
+                    item = session.get(OID_CISCO_CPU_1MIN)
+                    cpu_load = float(item.value)
                     if VERBOSE:
-                        print(f"{prefix}Found memory storage entry: index={memory_index} descr='{item.value}'")
-                    break
-
-            if memory_index:
-                # Get allocation units (bytes per unit)
-                units_item = session.get(f"{OID_HR_STORAGE_UNITS}.{memory_index}")
-                units = int(units_item.value)
-
-                # Get total size (in allocation units)
-                size_item = session.get(f"{OID_HR_STORAGE_SIZE}.{memory_index}")
-                size = int(size_item.value)
-
-                # Get used size (in allocation units)
-                used_item = session.get(f"{OID_HR_STORAGE_USED}.{memory_index}")
-                used = int(used_item.value)
-
-                # Calculate percentage
-                if size > 0:
-                    memory_pct = (used / size) * 100.0
-
+                        print(f"{prefix}SNMP CPU (Cisco 1-min): {cpu_load:.1f}%")
+                except Exception as e2:
                     if VERBOSE:
-                        memory_total_bytes = size * units
-                        memory_used_bytes = used * units
-                        print(f"{prefix}SNMP memory: used={memory_used_bytes:,} total={memory_total_bytes:,} ({memory_pct:.1f}%)")
+                        print(f"{prefix}SNMP GET Cisco CPU 1-min FAILED: {e2}")
+
+        elif vendor == 'hp':
+            try:
+                item = session.get(OID_HP_CPU_LOAD)
+                cpu_load = float(item.value)
+                if VERBOSE:
+                    print(f"{prefix}SNMP CPU (HP): {cpu_load:.1f}%")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET HP CPU FAILED: {e}")
+
+        elif vendor == 'juniper':
+            try:
+                item = session.get(OID_JUNIPER_CPU)
+                cpu_load = float(item.value)
+                if VERBOSE:
+                    print(f"{prefix}SNMP CPU (Juniper): {cpu_load:.1f}%")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET Juniper CPU FAILED: {e}")
+
+        elif vendor == 'ubiquiti':
+            try:
+                item = session.get(OID_UBNT_SYS_CPU)
+                cpu_load = float(item.value)
+                if VERBOSE:
+                    print(f"{prefix}SNMP CPU (Ubiquiti): {cpu_load:.1f}%")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET Ubiquiti CPU FAILED: {e}")
+
+        # Fallback to HOST-RESOURCES-MIB if vendor-specific failed or no vendor detected
+        if cpu_load is None:
+            try:
+                cpu_items = session.walk(OID_HR_PROCESSOR_LOAD)
+                if cpu_items:
+                    # Average all CPU cores
+                    cpu_values = [int(item.value) for item in cpu_items]
+                    cpu_load = sum(cpu_values) / len(cpu_values)
+                    if VERBOSE:
+                        print(f"{prefix}SNMP CPU (HOST-RESOURCES-MIB): {len(cpu_values)} cores, average={cpu_load:.1f}%")
                 else:
                     if VERBOSE:
-                        print(f"{prefix}SNMP memory: size=0, cannot calculate percentage")
-            else:
+                        print(f"{prefix}SNMP CPU: no processors found (HOST-RESOURCES-MIB not supported)")
+            except Exception as e:
                 if VERBOSE:
-                    print(f"{prefix}SNMP memory: no physical memory entry found in hrStorage table")
-        except Exception as e:
-            if VERBOSE:
-                print(f"{prefix}SNMP GET hrStorage FAILED: {e} (device may not support HOST-RESOURCES-MIB)")
+                    print(f"{prefix}SNMP GET hrProcessorLoad FAILED: {e}")
+
+        # Poll memory utilization (vendor-specific with HOST-RESOURCES-MIB fallback)
+        memory_pct = None
+
+        # Try vendor-specific OIDs first
+        if vendor == 'cisco':
+            try:
+                used_item = session.get(OID_CISCO_MEM_POOL_USED)
+                free_item = session.get(OID_CISCO_MEM_POOL_FREE)
+                mem_used = int(used_item.value)
+                mem_free = int(free_item.value)
+                mem_total = mem_used + mem_free
+
+                if mem_total > 0:
+                    memory_pct = (mem_used / mem_total) * 100.0
+                    if VERBOSE:
+                        print(f"{prefix}SNMP memory (Cisco): used={mem_used:,} total={mem_total:,} ({memory_pct:.1f}%)")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET Cisco memory FAILED: {e}")
+
+        elif vendor == 'hp':
+            try:
+                total_item = session.get(OID_HP_MEM_TOTAL)
+                free_item = session.get(OID_HP_MEM_FREE)
+                mem_total = int(total_item.value)
+                mem_free = int(free_item.value)
+                mem_used = mem_total - mem_free
+
+                if mem_total > 0:
+                    memory_pct = (mem_used / mem_total) * 100.0
+                    if VERBOSE:
+                        print(f"{prefix}SNMP memory (HP): used={mem_used:,} total={mem_total:,} ({memory_pct:.1f}%)")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET HP memory FAILED: {e}")
+
+        elif vendor == 'juniper':
+            try:
+                item = session.get(OID_JUNIPER_MEM_UTIL)
+                memory_pct = float(item.value)
+                if VERBOSE:
+                    print(f"{prefix}SNMP memory (Juniper): {memory_pct:.1f}%")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET Juniper memory FAILED: {e}")
+
+        elif vendor == 'ubiquiti':
+            try:
+                total_item = session.get(OID_UBNT_SYS_MEM_TOTAL)
+                free_item = session.get(OID_UBNT_SYS_MEM_FREE)
+                mem_total = int(total_item.value)
+                mem_free = int(free_item.value)
+                mem_used = mem_total - mem_free
+
+                if mem_total > 0:
+                    memory_pct = (mem_used / mem_total) * 100.0
+                    if VERBOSE:
+                        print(f"{prefix}SNMP memory (Ubiquiti): used={mem_used:,} total={mem_total:,} ({memory_pct:.1f}%)")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET Ubiquiti memory FAILED: {e}")
+
+        # Fallback to HOST-RESOURCES-MIB if vendor-specific failed or no vendor detected
+        if memory_pct is None:
+            try:
+                storage_items = session.walk(OID_HR_STORAGE_DESCR)
+
+                # Find physical memory entry (description contains "memory" or "RAM")
+                memory_index = None
+                for item in storage_items:
+                    descr = item.value.lower()
+                    if 'physical memory' in descr or 'ram' in descr or descr == 'memory':
+                        memory_index = item.oid.split('.')[-1]
+                        if VERBOSE:
+                            print(f"{prefix}Found memory storage entry: index={memory_index} descr='{item.value}'")
+                        break
+
+                if memory_index:
+                    # Get allocation units (bytes per unit)
+                    units_item = session.get(f"{OID_HR_STORAGE_UNITS}.{memory_index}")
+                    units = int(units_item.value)
+
+                    # Get total size (in allocation units)
+                    size_item = session.get(f"{OID_HR_STORAGE_SIZE}.{memory_index}")
+                    size = int(size_item.value)
+
+                    # Get used size (in allocation units)
+                    used_item = session.get(f"{OID_HR_STORAGE_USED}.{memory_index}")
+                    used = int(used_item.value)
+
+                    # Calculate percentage
+                    if size > 0:
+                        memory_pct = (used / size) * 100.0
+
+                        if VERBOSE:
+                            memory_total_bytes = size * units
+                            memory_used_bytes = used * units
+                            print(f"{prefix}SNMP memory (HOST-RESOURCES-MIB): used={memory_used_bytes:,} total={memory_total_bytes:,} ({memory_pct:.1f}%)")
+                    else:
+                        if VERBOSE:
+                            print(f"{prefix}SNMP memory: size=0, cannot calculate percentage")
+                else:
+                    if VERBOSE:
+                        print(f"{prefix}SNMP memory: no physical memory entry found in hrStorage table")
+            except Exception as e:
+                if VERBOSE:
+                    print(f"{prefix}SNMP GET hrStorage FAILED: {e}")
 
         # Update RRD database if enabled
         if RRD_ENABLED:
@@ -1656,8 +1812,12 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
                 summary_parts.append(f"tcp_retrans={tcp_retrans}")
             if cpu_load is not None:
                 summary_parts.append(f"cpu={cpu_load:.1f}%")
+            else:
+                summary_parts.append("cpu=unavailable")
             if memory_pct is not None:
                 summary_parts.append(f"memory={memory_pct:.1f}%")
+            else:
+                summary_parts.append("memory=unavailable")
 
             print(f"{prefix}SNMP poll SUCCESS for '{name}': {', '.join(summary_parts)}")
             for if_index in sorted(interfaces.keys()):
@@ -2986,7 +3146,7 @@ def generate_mrtg_index(all_config_files: List[str], index_path: str, site_name:
         html_lines.append("    </div>")
 
     html_lines.extend([
-        f"    <p style='margin-top: 40px; text-align: center; color: #888; font-size: 12px;'>Generated by APMonitor v{__version__} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>",
+        f"    <p style='margin-top: 40px; text-align: center; color: #888; font-size: 12px;'>Generated by <a href='https://github.com/CompSciFutures/APMonitor/'>APMonitor v{__version__}</a> at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>",
         "</body>",
         "</html>",
     ])
