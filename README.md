@@ -345,11 +345,12 @@ site:
   after_every_n_notifications: 1
 
 monitors:
-  # SNMP network device monitoring
+  # SNMP network device monitoring with 95th percentile graphing
   - type: snmp
     name: core-switch
     address: "snmp://192.168.1.1"
     community: "public"
+    percentile: 95
     check_every_n_secs: 300
     heartbeat_url: "https://hc-ping.com/uuid-here"
     heartbeat_every_n_secs: 600
@@ -704,14 +705,22 @@ SNMP monitors poll network devices for interface statistics and TCP metrics usin
 - **`address`**: URL with `snmp://` scheme and hostname/IP (format: `snmp://[community@]hostname[:port]`)
 
 **Optional Fields:**
+
 - **`community`** (string, optional): SNMP community string for authentication. Default: `public`
+
+- **`percentile`** (integer, optional): Percentile value to compute and display beneath each MRTG graph (e.g., `95` for 95th percentile billing). Must be an integer between 1 and 99. When specified, the Nth percentile is calculated over the graphed time range and shown in the stats table below each graph alongside Max/Average/Current.
+
+  The 95th percentile is the standard metric for burstable bandwidth ("95th percentile billing"), which discards the top 5% of traffic samples to allow for short bursts without penalising peak usage in capacity planning.
 ```yaml
 - type: snmp
   name: office-switch
   address: "snmp://192.168.1.6"
   community: "public"
+  percentile: 95
   check_every_n_secs: 300
 ```
+
+  **Note**: `percentile` is only valid for `snmp` monitors and has no effect unless `--generate-mrtg-config` is also used. The percentile is computed by `mrtg-rrd.cgi.pl` at graph render time via RRDtool's `VDEF PERCENT` consolidation function — it is not stored separately in the RRD.
 
 **SNMP Address Format:**
 
@@ -767,6 +776,7 @@ Interface names are sanitized to alphanumeric + underscore, truncated to 15 char
   name: core-switch
   address: "snmp://192.168.1.1:161"
   community: "monitoring"
+  percentile: 95
   check_every_n_secs: 300
   heartbeat_url: "https://hc-ping.com/uuid-here"
   heartbeat_every_n_secs: 600
@@ -775,6 +785,7 @@ Interface names are sanitized to alphanumeric + underscore, truncated to 15 char
 **Field Restrictions:**
 - `expect`, `ssl_fingerprint`, `ignore_ssl_expiry` fields are not valid for SNMP monitors
 - `send` and `content_type` fields are not valid for SNMP monitors
+- `percentile` is not valid for non-SNMP monitor types
 - SNMP monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
 
 ### Example Configurations
@@ -870,12 +881,13 @@ Interface names are sanitized to alphanumeric + underscore, truncated to 15 char
   check_every_n_secs: 300
 ```
 
-**SNMP Network Switch:**
+**SNMP Network Switch with 95th Percentile:**
 ```yaml
 - type: snmp
   name: office-switch
   address: "snmp://192.168.1.6"
   community: "public"
+  percentile: 95
   check_every_n_secs: 300
   heartbeat_url: "https://hc-ping.com/uuid-switch"
   heartbeat_every_n_secs: 600
@@ -909,6 +921,7 @@ The configuration validator enforces these rules:
 22. `community` field is optional for SNMP monitors and must be a non-empty string if specified
 23. `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, and `content_type` are not allowed for SNMP monitors
 24. SNMP monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
+25. `percentile` is only valid for SNMP monitors and must be an integer between 1 and 99
 
 # Dependencies
 

@@ -308,6 +308,29 @@ EOF
 	<TD ALIGN=RIGHT><SMALL>&nbsp;$relpercent[2]</SMALL></TD>
 EOF
 	}
+
+	# Percentile row - displayed when Percentile[target] is configured
+	# params->[3] contains [pct_in, pct_out] from do_image() VDEF/PRINT values
+	if (defined $tgt->{percentile} && defined $params->[3]) {
+		my ($pct_in, $pct_out) = @{$params->[3]};
+		my $pct_label = "$tgt->{percentile}th Percentile";
+		$pct_in  = defined $pct_in  ? sprintf('%.1f', $pct_in)  : 'N/A';
+		$pct_out = defined $pct_out ? sprintf('%.1f', $pct_out) : 'N/A';
+		print <<EOF unless ($tgt->{options}{noi} && $tgt->{options}{noo});
+    </TR><TR>
+EOF
+		print <<EOF unless ($tgt->{options}{noi});
+	<TD ALIGN=RIGHT><SMALL>$pct_label <FONT COLOR="$tgt->{col1}">$tgt->{legendi}</FONT></SMALL></TD>
+	<TD ALIGN=RIGHT><SMALL>&nbsp;$pct_in$tgt->{shortlegend}</SMALL></TD>
+	<TD WIDTH=5></TD>
+EOF
+		print <<EOF unless ($tgt->{options}{noo});
+	<TD ALIGN=RIGHT><SMALL>$pct_label <FONT COLOR="$tgt->{col2}">$tgt->{legendo}</FONT></SMALL></TD>
+	<TD ALIGN=RIGHT><SMALL>&nbsp;$pct_out$tgt->{shortlegend}</SMALL></TD>
+	<TD WIDTH=5></TD><TD></TD>
+EOF
+	}
+
 	print <<'EOF';
     </TR>
 </TABLE>
@@ -341,7 +364,7 @@ sub do_relpercent($$)
 	return @percent unless defined $tgt->{options}{dorelpercent};
 
 	for my $val (0..2) {
-		$percent[$val] = sprintf("%.1f", 
+		$percent[$val] = sprintf("%.1f",
 			$values->[2*$val+1] * 100 / $values->[2*$val])
 			if $values->[2*$val] > 0;
 		$percent[$val] ||= 0;
@@ -446,39 +469,71 @@ sub do_image($$)
 			unless $noo;
 	}
 
-    # Add after the @local_args section, before RRDs::graph call:
-    if (defined $target->{options}{dualaxis}) {
-        # Right axis for availability - scale independently
-        # Calculate scaling factor: right_max / left_max
-        my $left_max = $target->{maxbytes1} || 100000;
-        my $right_max = $target->{maxbytes2} || 100;
-        my $scale = $right_max / $left_max;
+	if (defined $target->{options}{dualaxis}) {
+		my $left_max  = $target->{maxbytes1} || 100000;
+		my $right_max = $target->{maxbytes2} || 100;
+		my $scale = $right_max / $left_max;
 
-        push @local_args, '--right-axis', "$scale:0";
-        push @local_args, '--right-axis-label', 'Availability %';
-        push @local_args, '--right-axis-format', '%.0lf%%';
-    }
+		push @local_args, '--right-axis', "$scale:0";
+		push @local_args, '--right-axis-label', 'Availability %';
+		push @local_args, '--right-axis-format', '%.0lf%%';
+	}
+
+	# Percentile: add VDEF/PRINT args so RRDs::graph returns the Nth percentile
+	# values alongside the standard MAX/AVERAGE/LAST PRINTs. These are appended
+	# after all other graph elements so they don't affect the graph visually.
+	my @percentile_args;
+	if (defined $target->{percentile}) {
+		my $n = $target->{percentile};
+		push @percentile_args, "VDEF:pctIn=in,$n,PERCENT"   unless $noi;
+		push @percentile_args, "PRINT:pctIn:%.2lf"          unless $noi;
+		push @percentile_args, "VDEF:pctOut=out,$n,PERCENT" unless $noo;
+		push @percentile_args, "PRINT:pctOut:%.2lf"         unless $noo;
+	}
 
 	my @rv = RRDs::graph($file, '-s', "-$back", @local_args,
 		@{$target->{args}}, "VRULE:$oldsec#ff0000",
-		"VRULE:$seconds#ff0000", @local_args_end);
+		"VRULE:$seconds#ff0000", @local_args_end, @percentile_args);
 
 	my $rrd_error = RRDs::error;
 	print_error("RRDs::graph failed, $rrd_error") if defined $rrd_error;
 
-	# In array context just return the values
+	# In array context: extract percentile PRINTs from the tail of rv[0].
+	# RRDs::graph returns PRINT values in rv[0] interleaved with graph stats.
+	# Standard PRINTs: [maxout, maxin, avgout, avgin, curout, curin] = 6 values.
+	# Percentile PRINTs follow: [pctIn, pctOut] (when both DS present).
 	if (wantarray) {
-		if (defined $target->{factor}) {
-			@{$rv[0]} = map { $_ * $target->{factor} } @{$rv[0]};
+		my @all_prints = @{$rv[0]};
+
+		# Split standard stats (first 6) from percentile values (remainder)
+		my @stats   = @all_prints[0..5];
+		my @pct_raw = @all_prints[6..$#all_prints];
+
+		# Parse percentile values - order matches PRINT order above:
+		# pctIn first (unless noi), pctOut second (unless noo)
+		my ($pct_in, $pct_out);
+		if (defined $target->{percentile}) {
+			my $idx = 0;
+			$pct_in  = $pct_raw[$idx++] unless $noi;
+			$pct_out = $pct_raw[$idx]   unless $noo;
 		}
+
+		if (defined $target->{factor}) {
+			@stats = map { $_ * $target->{factor} } @stats;
+			$pct_in  *= $target->{factor} if defined $pct_in;
+			$pct_out *= $target->{factor} if defined $pct_out;
+		}
+
+		my @pct_vals = defined $target->{percentile} ? [$pct_in, $pct_out] : undef;
+
 		if ($noi) {
-			return ([$rv[0][0], 0, $rv[0][1], 0, $rv[0][2], 0],
-				$rv[1], $rv[2]);
+			return ([$stats[0], 0, $stats[1], 0, $stats[2], 0],
+				$rv[1], $rv[2], @pct_vals);
 		} elsif ($noo) {
-			return ([0, $rv[0][0], 0, $rv[0][1], 0, $rv[0][2]],
-				$rv[1], $rv[2]);
+			return ([0, $stats[0], 0, $stats[1], 0, $stats[2]],
+				$rv[1], $rv[2], @pct_vals);
 		} else {
-			return @rv;
+			return (\@stats, $rv[1], $rv[2], @pct_vals);
 		}
 	}
 
@@ -488,7 +543,7 @@ sub do_image($$)
 	binmode PNG;
 
 	http_headers("image/$imagetype", $target->{config});
-		
+
 	my $buf;
         # could be sendfile in Linux ;-)
         while(sysread PNG, $buf, 8192) {
@@ -606,7 +661,7 @@ sub common_args($$$)
 	}
 
 	my $scale = 1;
-	
+
 	if (defined $target->{options}->{perminute}) {
 		$scale *= 60;
 	} elsif (defined $target->{options}->{perhour}) {
@@ -709,7 +764,7 @@ sub try_read_config($)
 	if (!defined $RRDs::VERSION || $RRDs::VERSION < 1.000331) {
 		print_error("Please install more up-to date RRDtool - need at least 1.000331");
 	}
-	
+
 	my $read_cfg;
 	if (!defined $config_time) {
 		$read_cfg = 1;
@@ -974,7 +1029,7 @@ EOF
 EOF
 			print "    </TR>\n" if $odd;
 			$odd = !$odd;
-		} 
+		}
 		print "    </TR>\n</TABLE>\n";
 	}
 
@@ -1007,7 +1062,7 @@ BORDER=0 SRC="$cfg->{icondir}/mrtg-r.$imagetype"></a></td>
 <td ALIGN=LEFT><font FACE="Arial,Helvetica" SIZE=2>
 version 2.9.17</font></td>
 <td ALIGN=RIGHT><font FACE="Arial,Helvetica" SIZE=2>
-<a HREF="http://ee-staff.ethz.ch/~oetiker/">Tobias Oetiker</a>
+<a HREF="http://ee-staff.ethz.ch/~oetiker/webtools/mrtg.html">Tobias Oetiker</a>
 <a HREF="mailto:oetiker\@ee.ethz.ch">&lt;oetiker\@ee.ethz.ch&gt;</a>
 </font></td>
 </tr><tr>
@@ -1083,22 +1138,21 @@ handler($q);
 # For FastCGI, uncomment this and comment out the above:
 #-# use FCGI;
 #-# use CGI;
-#-# 
+#-#
 #-# my $req = FCGI::Request();
-#-# 
+#-#
 #-# while ($req->Accept >= 0) {
 #-# 	my $q = new CGI;
-#-# 
+#-#
 #-# 	# thttpd fix up by Akihiro Sagawa
 #-# 	if ($q->server_software() =~ m|^thttpd/|) {
 #-# 		my $path = $q->path_info();
 #-# 		$path .= '/' if ($q->script_name=~ m|/$|);
 #-# 		$q->path_info($path);
 #-# 	}
-#-# 
+#-#
 #-# 	handler($q);
 #-# }
 #--END FCGI--
 
 1;
-

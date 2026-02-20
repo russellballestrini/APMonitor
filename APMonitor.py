@@ -490,7 +490,7 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 'type', 'name', 'address', 'check_every_n_secs', 'notify_every_n_secs',
                 'notify_on_down_every_n_secs', 'after_every_n_notifications', 'heartbeat_url',
                 'heartbeat_every_n_secs', 'expect', 'ssl_fingerprint', 'ignore_ssl_expiry', 'email',
-                'send', 'content_type', 'community'
+                'send', 'content_type', 'community', 'percentile'
             }
             unrecognized_monitor = set(monitor.keys()) - valid_monitor_params
             if unrecognized_monitor:
@@ -565,6 +565,10 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 if 'ssl_fingerprint' in monitor:
                     raise ConfigError(f"Monitor {i} (name: {name}): 'ssl_fingerprint' field is only valid for 'http' and 'quic' monitors")
 
+                # 'percentile' not allowed for ping
+                if 'percentile' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'percentile' field is only valid for 'snmp' monitors")
+
             elif monitor_type in ['http', 'quic']:
                 # Validate URL/URI
                 parsed = urlparse(address)
@@ -593,6 +597,10 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                     fp_len = len(fingerprint_clean)
                     if fp_len == 0 or (fp_len & (fp_len - 1)) != 0:
                         raise ConfigError(f"Monitor {i} (name: {name}): 'ssl_fingerprint' length must be a power of two (got {fp_len} hex characters)")
+
+                # 'percentile' not allowed for http/quic
+                if 'percentile' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'percentile' field is only valid for 'snmp' monitors")
 
             elif monitor_type in ['tcp', 'udp']:
                 # Validate URL/URI with tcp:// or udp:// scheme
@@ -628,6 +636,10 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 if 'ssl_fingerprint' in monitor:
                     raise ConfigError(f"Monitor {i} (name: {name}): 'ssl_fingerprint' field is only valid for 'http' and 'quic' monitors")
 
+                # 'percentile' not allowed for tcp/udp
+                if 'percentile' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'percentile' field is only valid for 'snmp' monitors")
+
             elif monitor_type == 'snmp':
                 # Validate URL/URI with snmp:// scheme
                 parsed = urlparse(address)
@@ -652,6 +664,11 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                         raise ConfigError(f"Monitor {i} (name: {name}): 'community' must be a string")
                     if len(monitor['community']) == 0:
                         raise ConfigError(f"Monitor {i} (name: {name}): 'community' must not be empty")
+
+                # Validate optional 'percentile'
+                if 'percentile' in monitor:
+                    if not isinstance(monitor['percentile'], int) or not (1 <= monitor['percentile'] <= 99):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'percentile' must be an integer between 1 and 99")
 
                 # 'expect' not allowed for SNMP
                 if 'expect' in monitor:
@@ -2843,8 +2860,8 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
         monitor_type = resource['type']
 
         if monitor_type == 'snmp':
-            # SNMP monitors get four separate targets
             rrd_path = get_rrd_path(resource['name'], 'snmp')
+            percentile = resource.get('percentile')
 
             # Target 1: Bandwidth (total_bits_in / total_bits_out)
             mrtg_lines.extend([
@@ -2863,6 +2880,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
                 f"LegendI[{safe_name}-bandwidth]: In:",
                 f"LegendO[{safe_name}-bandwidth]: Out:",
                 f"WithPeak[{safe_name}-bandwidth]: dwmy",
+                *([f"Percentile[{safe_name}-bandwidth]: {percentile}"] if percentile else []),
                 f"",
             ])
 
@@ -2883,6 +2901,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
                 f"LegendI[{safe_name}-packets]: In:",
                 f"LegendO[{safe_name}-packets]: Out:",
                 f"WithPeak[{safe_name}-packets]: dwmy",
+                *([f"Percentile[{safe_name}-packets]: {percentile}"] if percentile else []),
                 f"",
             ])
 
@@ -2903,6 +2922,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
                 f"LegendI[{safe_name}-retransmits]: Retrans:",
                 f"LegendO[{safe_name}-retransmits]: Retrans:",
                 f"WithPeak[{safe_name}-retransmits]: dwmy",
+                *([f"Percentile[{safe_name}-retransmits]: {percentile}"] if percentile else []),
                 f"",
             ])
 
@@ -2923,6 +2943,7 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
                 f"LegendI[{safe_name}-system]: CPU:",
                 f"LegendO[{safe_name}-system]: Memory:",
                 f"WithPeak[{safe_name}-system]: dwmy",
+                *([f"Percentile[{safe_name}-system]: {percentile}"] if percentile else []),
                 f"",
             ])
 
@@ -2930,27 +2951,23 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
             # Non-SNMP monitors (ping, http, quic, tcp, udp) - availability tracking
             rrd_path = get_rrd_path(resource['name'])
 
-            # MRTG with LogFormat: rrdtool reads RRD files directly
-            # Target points to the RRD file, data source names follow RRD DS names
-            # is_up stored as 0-100 in RRD for percentage display
-            # Order: response_time first (left axis), is_up second (right axis with dualaxis)
             mrtg_lines.extend([
                 f"######################################################################",
                 f"# {resource['name']} ({resource['type']})",
                 f"",
                 f"Target[{safe_name}]: response_time&is_up:{rrd_path}",
                 f"MaxBytes[{safe_name}]: 100000",
-                f"MaxBytes1[{safe_name}]: 100000",  # Response time max (ms) - first DS
-                f"MaxBytes2[{safe_name}]: 100",  # Availability max (percentage) - second DS
+                f"MaxBytes1[{safe_name}]: 100000",  # Response time max (ms)
+                f"MaxBytes2[{safe_name}]: 100",  # Availability max (percentage)
                 f"Title[{safe_name}]: {resource['name']} - Availability",
                 f"PageTop[{safe_name}]: <h1>{resource['name']} ({resource['address']})</h1>",
                 f"Options[{safe_name}]: gauge,nopercent,growright,dualaxis",
                 f"YLegend[{safe_name}]: Response Time (ms)",
-                f"ShortLegend[{safe_name}]:",  # Empty to suppress unit suffix
-                f"Legend1[{safe_name}]: Response Time (ms)",  # First DS (response_time) = In = Green
-                f"Legend2[{safe_name}]: Availability (%)",  # Second DS (is_up) = Out = Blue
-                f"LegendI[{safe_name}]: Response:",  # In (first DS)
-                f"LegendO[{safe_name}]: Avail:",  # Out (second DS)
+                f"ShortLegend[{safe_name}]:",
+                f"Legend1[{safe_name}]: Response Time (ms)",
+                f"Legend2[{safe_name}]: Availability (%)",
+                f"LegendI[{safe_name}]: Response:",
+                f"LegendO[{safe_name}]: Avail:",
                 f"WithPeak[{safe_name}]: dwmy",
                 f"",
             ])
@@ -2963,7 +2980,6 @@ def generate_mrtg_config(config: Dict[str, Any], work_dir: str, mrtg_config_path
     config_path = Path(mrtg_config_path)
 
     try:
-        # Write new config
         with open(new_path, 'w') as f:
             f.write(config_content)
 
@@ -3428,10 +3444,6 @@ def main() -> None:
         # Remove lockfile on exit
         if lockfile_path and os.path.exists(lockfile_path):
             os.remove(lockfile_path)
-
-
-if __name__ == '__main__':
-    main()
 
 
 if __name__ == '__main__':
