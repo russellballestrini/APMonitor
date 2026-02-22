@@ -44,7 +44,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-__version__ = "1.2.8"
+__version__ = "1.2.9"
 __app_name__ = "APMonitor"
 
 import argparse
@@ -507,7 +507,7 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
             monitor_names.add(name)
 
             # Validate type field
-            valid_types = ['ping', 'http', 'quic', 'tcp', 'udp', 'snmp']
+            valid_types = ['ping', 'http', 'quic', 'tcp', 'udp', 'snmp', 'ports']
             if monitor['type'] not in valid_types:
                 raise ConfigError(f"Monitor {i} (name: {monitor.get('name', 'unknown')}): invalid type '{monitor['type']}', must be one of {valid_types}")
 
@@ -689,6 +689,55 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 # 'content_type' not allowed for SNMP
                 if 'content_type' in monitor:
                     raise ConfigError(f"Monitor {i} (name: {name}): 'content_type' field not valid for SNMP monitors")
+
+            elif monitor_type == 'ports':
+                # Validate URL/URI with snmp:// scheme (ports uses SNMP transport)
+                parsed = urlparse(address)
+                if parsed.scheme != 'snmp':
+                    raise ConfigError(f"Monitor {i} (name: {name}): ports monitor must use 'snmp://' scheme, got '{address}'")
+                if not parsed.netloc:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'address' must include hostname/IP, got '{address}'")
+
+                # Validate hostname or IP address (IPv4 or IPv6)
+                hostname = parsed.hostname
+                if hostname:
+                    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+                    ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+                    hostname_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'
+
+                    if not (re.match(ipv4_pattern, hostname) or re.match(ipv6_pattern, hostname) or re.match(hostname_pattern, hostname)):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'address' hostname must be valid hostname, IPv4 or IPv6 address, got '{hostname}'")
+
+                # Validate optional 'community' string
+                if 'community' in monitor:
+                    if not isinstance(monitor['community'], str):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'community' must be a string")
+                    if len(monitor['community']) == 0:
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'community' must not be empty")
+
+                # 'expect' not allowed for ports
+                if 'expect' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'expect' field not valid for ports monitors")
+
+                # 'ssl_fingerprint' not allowed for ports
+                if 'ssl_fingerprint' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'ssl_fingerprint' field not valid for ports monitors")
+
+                # 'ignore_ssl_expiry' not allowed for ports
+                if 'ignore_ssl_expiry' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'ignore_ssl_expiry' field not valid for ports monitors")
+
+                # 'send' not allowed for ports
+                if 'send' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'send' field not valid for ports monitors")
+
+                # 'content_type' not allowed for ports
+                if 'content_type' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'content_type' field not valid for ports monitors")
+
+                # 'percentile' not allowed for ports
+                if 'percentile' in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'percentile' field not valid for ports monitors")
 
             # Validate heartbeat_url if present (valid for all monitor types)
             if 'heartbeat_url' in monitor:
@@ -1855,36 +1904,141 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
         return error_msg
 
 
-def check_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[int]]:
-    """Check resource with retry logic and response time tracking."""
-    last_response_time_ms = None
+def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Poll SNMP device for switch port (interface) oper/admin status changes.
+
+    Returns (error_msg, current_ports_state) where:
+    - error_msg: None on success, string on SNMP failure
+    - current_ports_state: dict of {if_index: {name, oper, admin}} for all interfaces
+    """
+    try:
+        from easysnmp import Session
+    except ImportError as e:
+        error_msg = f"easysnmp library import failed: {e} (try: pip install easysnmp)"
+        prefix = getattr(thread_local, 'prefix', '')
+        print(f"{prefix}PORTS check FAILED: {error_msg}", file=sys.stderr)
+        return error_msg, {}
+
+    prefix = getattr(thread_local, 'prefix', '')
+    address = resource['address']
+    name = resource['name']
+
+    # Parse SNMP configuration from address (format: snmp://community@host:port)
+    parsed = urlparse(address)
+    if parsed.scheme != 'snmp':
+        error_msg = f"{parsed.scheme.upper()} protocol not supported for ports monitor, use snmp"
+        print(f"{prefix}PORTS check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg, {}
+
+    # Extract community string - priority: monitor config > URL userinfo > default 'public'
+    community = resource.get('community') or parsed.username or 'public'
+    hostname = parsed.hostname
+    port = parsed.port or 161
+
+    if not hostname:
+        error_msg = "ports monitor address must include hostname"
+        print(f"{prefix}PORTS check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg, {}
+
+    # IF-MIB OIDs
+    OID_IF_DESCR        = '1.3.6.1.2.1.2.2.1.2'  # IF-MIB::ifDescr
+    OID_IF_OPER_STATUS  = '1.3.6.1.2.1.2.2.1.8'  # IF-MIB::ifOperStatus
+    OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'  # IF-MIB::ifAdminStatus
+
+    # IF-MIB integer -> human-readable status
+    OPER_STATUS = {
+        '1': 'up', '2': 'down', '3': 'testing',
+        '4': 'unknown', '5': 'dormant', '6': 'notPresent', '7': 'lowerLayerDown'
+    }
+    ADMIN_STATUS = {
+        '1': 'up', '2': 'down', '3': 'testing'
+    }
+
+    try:
+        session = Session(
+            hostname=hostname,
+            community=community,
+            version=2,
+            remote_port=port,
+            timeout=MAX_TRY_SECS,
+            retries=MAX_RETRIES - 1
+        )
+
+        # Walk all three tables
+        descr_items  = session.walk(OID_IF_DESCR)
+        oper_items   = session.walk(OID_IF_OPER_STATUS)
+        admin_items  = session.walk(OID_IF_ADMIN_STATUS)
+
+    except Exception as e:
+        error_msg = f"SNMP walk failed: {e}"
+        print(f"{prefix}PORTS check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg, {}
+
+    # Index by interface index
+    descr_by_index = {item.oid.split('.')[-1]: item.value for item in descr_items}
+    oper_by_index  = {item.oid.split('.')[-1]: item.value for item in oper_items}
+    admin_by_index = {item.oid.split('.')[-1]: item.value for item in admin_items}
+
+    if not descr_by_index:
+        error_msg = "no interfaces found"
+        print(f"{prefix}PORTS check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg, {}
+
+    # Build current state - numeric sort on interface index
+    current_ports_state = {}
+    for if_index in sorted(descr_by_index.keys(), key=lambda x: int(x)):
+        oper_raw  = oper_by_index.get(if_index, '4')   # default: unknown
+        admin_raw = admin_by_index.get(if_index, '2')  # default: down
+        current_ports_state[if_index] = {
+            'name':  descr_by_index[if_index],
+            'oper':  OPER_STATUS.get(oper_raw, oper_raw),
+            'admin': ADMIN_STATUS.get(admin_raw, admin_raw),
+        }
+
+    if VERBOSE:
+        print(f"{prefix}PORTS poll SUCCESS for '{name}': {len(current_ports_state)} interfaces found")
+        for if_index, iface in current_ports_state.items():
+            print(f"{prefix}  Interface {if_index} ({iface['name']}): oper={iface['oper']} admin={iface['admin']}")
+
+    return None, current_ports_state
+
+
+def check_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], Optional[Dict]]:
+    """Check resource with retry logic and response time tracking.
+
+    Returns (error_msg, response_time_ms, ports_state) where ports_state is only
+    populated for 'ports' monitors, None for all other types.
+    """
+    error_msg = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         start_time_ms = int(time.time() * 1000)
 
         if resource['type'] == 'ping':
             error_msg = check_ping_resource(resource)
-        elif resource['type'] == "snmp":
+            ports_state = None
+        elif resource['type'] == 'snmp':
             error_msg = check_snmp_resource(resource)
+            ports_state = None
+        elif resource['type'] == 'ports':
+            error_msg, ports_state = check_ports_resource(resource)
         elif resource['type'] in ('http', 'quic', 'tcp', 'udp'):
             error_msg = check_url_resource(resource)
+            ports_state = None
         else:
             raise ConfigError(f"Unknown resource type: {resource['type']} for monitor {resource['name']}")
 
         end_time_ms = int(time.time() * 1000)
         response_time_ms = end_time_ms - start_time_ms
 
-        # If check succeeded, record response time and return
         if error_msg is None:
             last_response_time_ms = response_time_ms
-            return None, last_response_time_ms
+            return None, last_response_time_ms, ports_state
 
-        # If check failed and we have retries left, sleep before next attempt
         if attempt < MAX_RETRIES:
             time.sleep(MAX_TRY_SECS)
 
-    # All retries exhausted, return the last error (no response time on failure)
-    return error_msg, None
+    return error_msg, None, None
 
 
 def ping_heartbeat_url(
@@ -2572,7 +2726,7 @@ def create_rrd_rras(step_secs: int) -> List[str]:
     ]
 
 
-def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -> None:
+def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any]) -> None:
     """Check resource and ping heartbeat if up."""
 
     # Store prefix in thread-local storage at start of thread execution
@@ -2625,9 +2779,10 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
         prev_last_notified = prev_state.get('last_notified')
         prev_last_successful_heartbeat = prev_state.get('last_successful_heartbeat')
         prev_notified_count = prev_state.get('notified_count', 0)
+        prev_ports_state = prev_state.get('ports_state')  # None on first poll
 
     # Check resource and ping heartbeat URL
-    error_reason, last_response_time_ms = check_resource(resource)
+    error_reason, last_response_time_ms, current_ports_state = check_resource(resource)
     is_up = error_reason is None
     last_successful_heartbeat = prev_last_successful_heartbeat
 
@@ -2644,6 +2799,100 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
                 last_successful_heartbeat = datetime.now().isoformat()
         elif VERBOSE:
             print(f"{prefix}skipping heartbeat for {resource['name']} (heartbeat sent {format_time_ago(prev_last_successful_heartbeat)} ago)")
+
+    # Handle ports monitor diff/notify logic
+    if resource['type'] == 'ports' and is_up and current_ports_state:
+        if prev_ports_state is None:
+            # First poll - establish baseline, no alerts
+            if VERBOSE:
+                print(f"{prefix}PORTS baseline established for '{resource['name']}': {len(current_ports_state)} interfaces")
+        else:
+            # Diff current vs baseline, fire one notification per changed interface
+            notify_every_n_secs = resource.get('notify_every_n_secs', DEFAULT_NOTIFY_EVERY_N_SECS)
+            after_every_n_notifications = resource.get('after_every_n_notifications', DEFAULT_AFTER_EVERY_N_NOTIFICATIONS)
+            monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
+
+            # Collect all interface indices across both states
+            all_indices = set(prev_ports_state.keys()) | set(current_ports_state.keys())
+
+            for if_index in sorted(all_indices):
+                prev_iface = prev_ports_state.get(if_index)
+                curr_iface = current_ports_state.get(if_index)
+
+                # Detect change
+                if prev_iface == curr_iface:
+                    continue
+
+                # Build change message
+                if prev_iface is None:
+                    # New interface appeared
+                    change_msg = (
+                        f"{resource['name']} in {site_config['name']}: "
+                        f"{curr_iface['name']} appeared "
+                        f"oper={curr_iface['oper']} admin={curr_iface['admin']} at {timestamp_str}"
+                    )
+                elif curr_iface is None:
+                    # Interface disappeared
+                    change_msg = (
+                        f"{resource['name']} in {site_config['name']}: "
+                        f"{prev_iface['name']} disappeared "
+                        f"(was oper={prev_iface['oper']} admin={prev_iface['admin']}) at {timestamp_str}"
+                    )
+                else:
+                    # Status changed
+                    change_msg = (
+                        f"{resource['name']} in {site_config['name']}: "
+                        f"{curr_iface['name']} oper={curr_iface['oper']} admin={curr_iface['admin']} "
+                        f"(was oper={prev_iface['oper']} admin={prev_iface['admin']}) at {timestamp_str}"
+                    )
+
+                print(f"{prefix}##### PORT CHANGE: {change_msg} #####", file=sys.stderr)
+
+                # Per-interface notification throttling via prev_notified_count / prev_last_notified
+                secs_since_first_notification = 0
+                if prev_last_alarm_started:
+                    try:
+                        alarm_started_time = datetime.fromisoformat(prev_last_alarm_started)
+                        secs_since_first_notification = (now - alarm_started_time).total_seconds()
+                    except:
+                        pass
+
+                next_notification_delay_secs = calc_next_notification_delay_secs(
+                    notify_every_n_secs, after_every_n_notifications,
+                    secs_since_first_notification, prev_notified_count
+                )
+
+                should_notify = True
+                seconds_since_notify = False
+                if prev_last_notified:
+                    try:
+                        last_notified_time = datetime.fromisoformat(prev_last_notified)
+                        seconds_since_notify = (now - last_notified_time).total_seconds()
+                        should_notify = seconds_since_notify >= next_notification_delay_secs
+                    except:
+                        should_notify = True
+
+                if should_notify:
+                    if monitor_email_enabled and 'outage_emails' in site_config:
+                        for email_entry in site_config['outage_emails']:
+                            notify_resource_outage_with_email(
+                                email_entry, site_config['name'], change_msg, site_config, 'outage')
+
+                    if 'outage_webhooks' in site_config:
+                        for webhook in site_config['outage_webhooks']:
+                            notify_resource_outage_with_webhook(
+                                webhook, site_config['name'], change_msg)
+
+                    prev_last_notified = now.isoformat()
+                    prev_notified_count += 1
+                    prev_last_alarm_started = prev_last_alarm_started or now.isoformat()
+                else:
+                    if VERBOSE:
+                        if not seconds_since_notify:
+                            print(f"{prefix}skipping port change notification for {resource['name']} (notified {format_time_ago(prev_last_notified)} ago)")
+                        else:
+                            time_until_next_secs = next_notification_delay_secs - seconds_since_notify
+                            print(f"{prefix}skipping port change notification for {resource['name']} for {format_time_ago(time_until_next_secs)}")
 
     # Calculate new down_count, last_alarm_started, and last_notified
     if is_up:
@@ -2668,8 +2917,6 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
                     notify_resource_outage_with_webhook(webhook, site_config['name'], recovery_message)
 
             last_notified = now.isoformat()
-
-            # Keep notified_count from previous outage
             notified_count = prev_notified_count
         else:
             last_notified = prev_last_notified
@@ -2750,8 +2997,8 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
             last_notified = prev_last_notified
             notified_count = prev_notified_count
 
-    # Update RRD database for MRTG
-    if RRD_ENABLED:
+    # Update RRD database for MRTG (availability monitors only)
+    if RRD_ENABLED and resource['type'] not in ('snmp', 'ports'):
         rrd_path = get_rrd_path(resource['name'])
         if VERBOSE > 1:
             print(f"{prefix}updating RRD database for {rrd_path} w/ {now}, {last_response_time_ms}, {is_up}")
@@ -2760,20 +3007,24 @@ def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -
         update_rrd(rrd_path, now, last_response_time_ms, is_up)
 
     # Update state for this resource
-    update_state({
-        resource['name']: {
-            'is_up': is_up,
-            'last_checked': now.isoformat(),
-            'last_response_time_ms': last_response_time_ms,
-            'down_count': down_count,
-            'last_alarm_started': last_alarm_started,
-            'last_notified': last_notified,
-            'last_successful_heartbeat': last_successful_heartbeat,
-            'notified_count': notified_count,
-            'error_reason': error_reason,
-            'last_config_checksum': resource_checksum
-        }
-    })
+    new_state = {
+        'is_up': is_up,
+        'last_checked': now.isoformat(),
+        'last_response_time_ms': last_response_time_ms,
+        'down_count': down_count,
+        'last_alarm_started': prev_last_alarm_started if is_up else last_alarm_started,
+        'last_notified': last_notified if is_up else (last_notified if should_notify else prev_last_notified),
+        'last_successful_heartbeat': last_successful_heartbeat,
+        'notified_count': notified_count,
+        'error_reason': error_reason,
+        'last_config_checksum': resource_checksum,
+    }
+
+    # Persist ports baseline for next poll
+    if resource['type'] == 'ports' and current_ports_state:
+        new_state['ports_state'] = current_ports_state
+
+    update_state({resource['name']: new_state})
 
 
 def get_default_statefile() -> str:
@@ -2790,6 +3041,11 @@ def get_default_statefile() -> str:
     else:
         # Unknown platform: Use current directory as safe fallback
         return './apmonitor-statefile.json'
+
+
+def check_and_heartbeat(resource: Dict[str, Any], site_config: Dict[str, Any]) -> None:
+
+    return check_and_heartbeat_r(resource, site_config)
 
 
 def create_pid_file_or_exit_on_unix(config_path: str) -> Optional[str]:

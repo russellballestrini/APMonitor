@@ -9,6 +9,10 @@ Multithreaded high speed availability checking for PING, TCP/UDP, QUIC & HTTP/S 
 Integrates w/Site24x7 heartbeat monitoring for failover alerts + Slack & Pushover webhooks.
 Thread safe, reentrant, 
 
+# Release 1.2.9 (???): ???
+- Scaffolded up SNMP walk checking of ports up/down. Needs testing.
+- Made ports sort numerically rather than lexicographically for clarity
+
 # Release 1.2.8 (21-Feb-26): SNMP + Percentile Support
 - Added more SNMP metrics for CPU, PPS, KBits/Sec & Memory
 - Rendered more SNMP metrics for CPU, PPS, KBits/Sec & Memory into index.html
