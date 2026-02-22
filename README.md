@@ -345,6 +345,15 @@ site:
   after_every_n_notifications: 1
 
 monitors:
+  # Switch port status monitoring with per-interface silence windows
+  - type: ports
+    name: office-switch
+    address: "snmp://192.168.1.6"
+    community: "public"
+    check_every_n_secs: 30
+    notify_every_n_secs: 3600
+    after_every_n_notifications: 1
+
   # SNMP network device monitoring with 95th percentile graphing
   - type: snmp
     name: core-switch
@@ -550,6 +559,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - `tcp`: TCP port connectivity and protocol check
   - `udp`: UDP datagram send/receive check
   - `snmp`: SNMP network device monitoring (interface bandwidth, TCP retransmits)
+  - `ports`: SNMP switch port status monitor (tracks interface oper/admin state changes with per-interface silence windows)
 
 - **`name`** (string): Unique identifier for this monitor. Must be unique across all monitors in the configuration. Used in notifications and state tracking.
 
@@ -559,6 +569,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - For `tcp`: URL with `tcp://` scheme, hostname/IP, and port (e.g., `tcp://server.example.com:22`)
   - For `udp`: URL with `udp://` scheme, hostname/IP, and port (e.g., `udp://192.168.1.1:161`)
   - For `snmp`: URL with `snmp://` scheme and hostname/IP (e.g., `snmp://192.168.1.1` or `snmp://192.168.1.1:161`)
+  - For `ports`: URL with `snmp://` scheme and hostname/IP — uses SNMP transport, same format as `snmp` (e.g., `snmp://192.168.1.6`)
 
 ### Optional Fields (All Monitor Types)
 
@@ -788,6 +799,69 @@ Interface names are sanitized to alphanumeric + underscore, truncated to 15 char
 - `percentile` is not valid for non-SNMP monitor types
 - SNMP monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
 
+### Ports Monitor Specific Fields
+
+The `ports` monitor type polls a managed network switch or router via SNMPv2c to track the operational and administrative status of every interface. It fires one notification per changed interface and enforces per-interface silence windows to suppress flap noise.
+
+**Required Fields:**
+- **`type`**: Must be `ports`
+- **`address`**: URL with `snmp://` scheme and hostname/IP — same format as `snmp` monitors (e.g., `snmp://192.168.1.6`). Uses IF-MIB via SNMP transport.
+
+**Optional Fields:**
+
+- **`community`** (string, optional): SNMP community string. Default: `public`
+
+- **`notify_every_n_secs`** / **`after_every_n_notifications`** (integers, optional): Control the per-interface silence window. Once an interface change fires a notification, further alerts for that interface are suppressed for `notify_every_n_secs × after_every_n_notifications` seconds. After the window expires, the baseline advances to the current interface state. Default values from site config apply.
+
+**Silence Window Semantics:**
+
+Each interface tracks its own silence window independently:
+
+- **First poll**: establishes a silent baseline (no alerts, prints to stderr for diagnostics)
+- **Change detected**: alert fires immediately, silence window opens for that interface only
+- **During window**: baseline is held at the pre-change state; further state changes (including flap-back to original) are absorbed silently
+- **Window expires**: baseline advances to current state regardless of intermediate flaps; new changes can trigger fresh alerts
+
+This means if an interface flaps down then back up during the silence window, both events are suppressed and the window still runs its full duration — the baseline advances to whatever state the interface is in when the window expires.
+
+**Monitored MIB Objects:**
+- **IF-MIB::ifDescr** (1.3.6.1.2.1.2.2.1.2) — Interface name/description
+- **IF-MIB::ifOperStatus** (1.3.6.1.2.1.2.2.1.8) — Operational status (`up`/`down`/`testing`/`unknown`/`dormant`/`notPresent`/`lowerLayerDown`)
+- **IF-MIB::ifAdminStatus** (1.3.6.1.2.1.2.2.1.7) — Administrative status (`up`/`down`/`testing`)
+
+**State Tracking:**
+
+The state file stores two keys per `ports` monitor:
+- `ports_state`: committed baseline — `{if_index: {name, oper, admin}}` per interface; only advances after the silence window expires
+- `ports_pending`: per-interface silence window records — `{if_index: {first_notified_at, secs_since_first_notification, current_notification_index, baseline_iface}}`
+
+**Field Restrictions:**
+- `expect`, `ssl_fingerprint`, `ignore_ssl_expiry` are not valid for `ports` monitors
+- `send`, `content_type`, `percentile` are not valid for `ports` monitors
+- `ports` monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
+- RRD/MRTG graph generation is not supported for `ports` monitors (no numeric time-series metrics collected)
+
+**Example Ports Monitor Configuration:**
+```yaml
+- type: ports
+  name: office-switch
+  address: "snmp://192.168.1.6"
+  community: "public"
+  check_every_n_secs: 30
+  notify_every_n_secs: 3600
+  after_every_n_notifications: 1
+```
+
+With the above config, the silence window is `3600 × 1 = 3600` seconds (1 hour). Once an interface change fires, that interface won't alert again for 1 hour regardless of further state changes.
+
+**Sample Notification Output:**
+```
+##### PORT BASELINE: office-switch in HomeLab: GigabitEthernet0/1 oper=up admin=up #####
+##### PORT CHANGE: office-switch in HomeLab: GigabitEthernet0/2 oper=down admin=up (was oper=up admin=up) at 2:15 PM #####
+##### PORT CHANGE: office-switch in HomeLab: GigabitEthernet0/5 appeared oper=up admin=up at 2:15 PM #####
+##### PORT CHANGE: office-switch in HomeLab: GigabitEthernet0/3 disappeared (was oper=up admin=up) at 2:15 PM #####
+```
+
 ### Example Configurations
 
 **Ping Monitor:**
@@ -893,6 +967,17 @@ Interface names are sanitized to alphanumeric + underscore, truncated to 15 char
   heartbeat_every_n_secs: 600
 ```
 
+**Switch Port Status Monitor:**
+```yaml
+- type: ports
+  name: office-switch
+  address: "snmp://192.168.1.6"
+  community: "public"
+  check_every_n_secs: 30
+  notify_every_n_secs: 3600
+  after_every_n_notifications: 1
+```
+
 ### Validation Rules
 
 The configuration validator enforces these rules:
@@ -922,6 +1007,10 @@ The configuration validator enforces these rules:
 23. `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, and `content_type` are not allowed for SNMP monitors
 24. SNMP monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
 25. `percentile` is only valid for SNMP monitors and must be an integer between 1 and 99
+26. `ports` monitors must use `snmp://` scheme (SNMP transport)
+27. `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, `content_type`, and `percentile` are not allowed for `ports` monitors
+28. `ports` monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
+29. `ports` monitors establish a silent baseline on first poll and alert on per-interface state changes thereafter
 
 # Dependencies
 
@@ -939,7 +1028,7 @@ sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioq
 
 **Note**: 
 - The `aioquic` package is required for QUIC/HTTP3 monitoring support. If you don't plan to use `type: quic` monitors, you can omit this dependency.
-- The `easysnmp` package and `libsnmp-dev` system library are required for SNMP monitoring support. If you don't plan to use `type: snmp` monitors, you can omit these dependencies.
+- The `easysnmp` package and `libsnmp-dev` system library are required for SNMP monitoring support. If you don't plan to use `type: snmp` or `type: ports` monitors, you can omit these dependencies.
 
 # Example invocation:
 ```
@@ -1187,6 +1276,9 @@ The state file tracks:
 - `notified_count`: Number of notifications sent for current outage
 - `error_reason`: Last error message
 - `last_config_checksum`: SHA-256 hash of monitor configuration (detects config changes)
+- `ports_state`: (ports monitors only) committed baseline — dict of `{if_index: {name, oper, admin}}` per interface, advances only after silence window expires
+- `ports_pending`: (ports monitors only) per-interface silence window state — dict of `{if_index: {first_notified_at, secs_since_first_notification, current_notification_index, baseline_iface}}` tracking active silence windows
+
 
 **Note**: If using `/tmp/statefile.json`, the state file is cleared on system reboot. This resets all monitoring history but doesn't affect functionality—monitoring resumes normally on first run.
 
@@ -1292,7 +1384,7 @@ sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 - `pyOpenSSL` - SSL certificate verification and fingerprint checking
 - `urllib3` - HTTP connection pooling (dependency of requests)
 - `aioquic` - QUIC/HTTP3 protocol support (required for `type: quic` monitors)
-- `easysnmp` - SNMP monitoring support (required for `type: snmp` monitors)
+- `easysnmp` - SNMP monitoring support (required for `type: snmp` and `type: ports` monitors)
 
 ## Step 3: Create Monitoring User
 
@@ -1463,6 +1555,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 - Add additional monitors:
   - ~~TCP & UDP port monitoring~~ (completed in v1.2.0)
   - ~~SNMP w/defaults for managed switches and system performance tuning~~ (completed in v1.2.5)
+  - ~~Switch port status monitoring (`ports` type) with per-interface silence windows~~ (completed in v1.2.9)
   - Update docs to provide webhook examples for Pushover, Slack & Discord
 
 - Add additional outputs: 
