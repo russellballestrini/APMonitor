@@ -29,6 +29,7 @@ Master of Science<br />
 <i>Ex-ServerMasters<br/>
 Ex-Googler<br />
 Ex-Xerox PARC/PARK<br/>
+Ex-Intel Foundry<br/>
 Ex Chief Scientist @ Clemenger BBDO / Omnicom</i>
 
 <i>[ACM](https://acm.org/), [IEEE](https://ieee.org) & [INFORMS](https://informs.org) member.</i>
@@ -1556,6 +1557,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
   - ~~TCP & UDP port monitoring~~ (completed in v1.2.0)
   - ~~SNMP w/defaults for managed switches and system performance tuning~~ (completed in v1.2.5)
   - ~~Switch port status monitoring (`ports` type) with per-interface silence windows~~ (completed in v1.2.9)
+  - Add automated MAC address pinning to port status monitoring
   - Update docs to provide webhook examples for Pushover, Slack & Discord
 
 - Add additional outputs: 
@@ -1586,7 +1588,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 
 APMonitor.py is licensed under the [GNU General Public License version 3](LICENSE.txt).
 ```
-Software: APMonitor 1.2.9
+Software: APMonitor 1.2.10
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```

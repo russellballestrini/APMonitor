@@ -1905,11 +1905,14 @@ def check_snmp_resource(resource: Dict[str, Any]) -> Optional[str]:
 
 
 def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any]]:
-    """Poll SNMP device for switch port (interface) oper/admin status changes.
+    """Poll SNMP device for switch port (interface) oper/admin status and MAC forwarding table.
+
+    Uses IF-MIB for port status and Q-BRIDGE-MIB (RFC 2674) dot1qTpFdbTable for MAC addresses.
+    Q-BRIDGE-MIB OID tail encodes <vlan_id>.<6 MAC octets>, value is bridge port number (= ifIndex).
 
     Returns (error_msg, current_ports_state) where:
     - error_msg: None on success, string on SNMP failure
-    - current_ports_state: dict of {if_index: {name, oper, admin}} for all interfaces
+    - current_ports_state: dict of {if_index: {name, oper, admin, macs}} for all interfaces
     """
     try:
         from easysnmp import Session
@@ -1941,9 +1944,14 @@ def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[
         return error_msg, {}
 
     # IF-MIB OIDs
-    OID_IF_DESCR        = '1.3.6.1.2.1.2.2.1.2'  # IF-MIB::ifDescr
-    OID_IF_OPER_STATUS  = '1.3.6.1.2.1.2.2.1.8'  # IF-MIB::ifOperStatus
-    OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'  # IF-MIB::ifAdminStatus
+    OID_IF_DESCR        = '1.3.6.1.2.1.2.2.1.2'    # IF-MIB::ifDescr
+    OID_IF_OPER_STATUS  = '1.3.6.1.2.1.2.2.1.8'    # IF-MIB::ifOperStatus
+    OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'    # IF-MIB::ifAdminStatus
+
+    # Q-BRIDGE-MIB OIDs (RFC 2674)
+    # OID tail: <vlan_id>.<6 MAC octets>, value = bridge port number (= ifIndex on most switches)
+    OID_DOT1Q_TP_FDB_PORT   = '1.3.6.1.2.1.17.7.1.2.2.1.2'  # dot1qTpFdbPort
+    OID_DOT1Q_TP_FDB_STATUS = '1.3.6.1.2.1.17.7.1.2.2.1.3'  # dot1qTpFdbStatus - 3=learned
 
     # IF-MIB integer -> human-readable status
     OPER_STATUS = {
@@ -1953,6 +1961,9 @@ def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[
     ADMIN_STATUS = {
         '1': 'up', '2': 'down', '3': 'testing'
     }
+
+    # dot1qTpFdbStatus - only learned MACs are dynamically associated with a port
+    FDB_STATUS_LEARNED = '3'
 
     try:
         session = Session(
@@ -1964,7 +1975,7 @@ def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[
             retries=MAX_RETRIES - 1
         )
 
-        # Walk all three tables
+        # Walk all three IF-MIB tables
         descr_items  = session.walk(OID_IF_DESCR)
         oper_items   = session.walk(OID_IF_OPER_STATUS)
         admin_items  = session.walk(OID_IF_ADMIN_STATUS)
@@ -1984,21 +1995,62 @@ def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[
         print(f"{prefix}PORTS check FAILED for '{name}': {error_msg}", file=sys.stderr)
         return error_msg, {}
 
+    # Build ifIndex -> sorted list of learned MAC addresses from dot1qTpFdbTable
+    # OID tail is 7 octets: <vlan_id>.<6 MAC octets>
+    # Value is bridge port number, which equals ifIndex directly on most switches
+    macs_by_ifindex: Dict[str, list] = {}
+    try:
+        fdb_port_items   = session.walk(OID_DOT1Q_TP_FDB_PORT)
+        fdb_status_items = session.walk(OID_DOT1Q_TP_FDB_STATUS)
+
+        # Index status by 7-octet OID tail for O(1) lookup
+        fdb_status_by_oid = {
+            '.'.join(item.oid.split('.')[-7:]): item.value
+            for item in fdb_status_items
+        }
+
+        for item in fdb_port_items:
+            oid_tail    = '.'.join(item.oid.split('.')[-7:])  # e.g. "1.36.90.76.31.80.156"
+            mac_octets  = oid_tail.split('.')[1:]             # strip vlan_id, keep 6 MAC octets
+            if_index    = item.value                          # = ifIndex directly on this switch
+
+            # Only include learned MACs (status=3); skip self, mgmt, invalid, other
+            if fdb_status_by_oid.get(oid_tail) != FDB_STATUS_LEARNED:
+                continue
+
+            if len(mac_octets) != 6:
+                continue
+
+            mac_str = ':'.join(f'{int(o):02X}' for o in mac_octets)
+            macs_by_ifindex.setdefault(if_index, []).append(mac_str)
+
+        if VERBOSE:
+            total_macs = sum(len(v) for v in macs_by_ifindex.values())
+            print(f"{prefix}PORTS MAC table: {total_macs} learned MACs across {len(macs_by_ifindex)} interfaces")
+
+    except Exception as e:
+        # Non-fatal: proceed without MAC data
+        if VERBOSE:
+            print(f"{prefix}PORTS Q-BRIDGE FDB walk failed for '{name}' (MACs unavailable): {e}")
+
     # Build current state - numeric sort on interface index
     current_ports_state = {}
     for if_index in sorted(descr_by_index.keys(), key=lambda x: int(x)):
         oper_raw  = oper_by_index.get(if_index, '4')   # default: unknown
         admin_raw = admin_by_index.get(if_index, '2')  # default: down
+        macs      = sorted(macs_by_ifindex.get(if_index, []))  # sorted for stable set comparison
         current_ports_state[if_index] = {
             'name':  descr_by_index[if_index],
             'oper':  OPER_STATUS.get(oper_raw, oper_raw),
             'admin': ADMIN_STATUS.get(admin_raw, admin_raw),
+            'macs':  macs,
         }
 
     if VERBOSE:
         print(f"{prefix}PORTS poll SUCCESS for '{name}': {len(current_ports_state)} interfaces found")
         for if_index, iface in current_ports_state.items():
-            print(f"{prefix}  Interface {if_index} ({iface['name']}): oper={iface['oper']} admin={iface['admin']}")
+            mac_str = ', '.join(iface['macs']) if iface['macs'] else 'none'
+            print(f"{prefix}  Interface {if_index} ({iface['name']}): oper={iface['oper']} admin={iface['admin']} macs=[{mac_str}]")
 
     return None, current_ports_state
 
@@ -2736,6 +2788,11 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
     # Calculate current config checksum
     resource_checksum = calc_config_checksum(resource)
 
+    # Get pacing config for this resource
+    notify_every_n_secs = resource.get('notify_every_n_secs', DEFAULT_NOTIFY_EVERY_N_SECS)
+    after_every_n_notifications = resource.get('after_every_n_notifications', DEFAULT_AFTER_EVERY_N_NOTIFICATIONS)
+    # print(f"{prefix} PACING: notify_every_n_secs={notify_every_n_secs} after_every_n_notifications={after_every_n_notifications}")
+
     # Get previous state for this resource
     with STATE_LOCK:
         prev_state = STATE.get(resource['name'], {}) or {}
@@ -2808,8 +2865,6 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
                 print(f"{prefix}PORTS baseline established for '{resource['name']}': {len(current_ports_state)} interfaces")
         else:
             # Diff current vs baseline, fire one notification per changed interface
-            notify_every_n_secs = resource.get('notify_every_n_secs', DEFAULT_NOTIFY_EVERY_N_SECS)
-            after_every_n_notifications = resource.get('after_every_n_notifications', DEFAULT_AFTER_EVERY_N_NOTIFICATIONS)
             monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
 
             # Collect all interface indices across both states
