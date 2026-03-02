@@ -1,6 +1,6 @@
 <img src="images/APMonitor-logo.png" alt="APMonitor logo" width="128" height="128" style="vertical-align: text-bottom;">
 
-# `APMonitor.py` - A Hands-Off On-Premises Monitoring Tool with Alert Delivery Guarantees
+# `APMonitor.py` - A Hands-Off Layer 2 & 4 On-Premises Monitoring Tool with Alert Delivery Guarantees
 
 This is an on-prem monitoring tool written completely in very clear Python-only code (so you can modify it) and is designed to work on a LAN for on-prem availability monitoring of resources that aren't necesarilly connected to The Internet, and/or where the on-prem monitoring itself is also required to have availability guarantees.
 

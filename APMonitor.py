@@ -2866,89 +2866,71 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
             if VERBOSE:
                 print(f"{prefix}PORTS baseline established for '{resource['name']}': {len(current_ports_state)} interfaces")
         else:
-            # Collect all interface indices across both states
+            # Collect all interface indices across both states - numeric sort
             all_indices = set(prev_ports_state.keys()) | set(current_ports_state.keys())
 
-            for if_index in sorted(all_indices):
+            for if_index in sorted(all_indices, key=lambda x: int(x)):
                 prev_iface = prev_ports_state.get(if_index)
                 curr_iface = current_ports_state.get(if_index)
 
-                # Detect change
-                if prev_iface == curr_iface:
-                    continue
-
-                # Build change message
-                if prev_iface is None:
-                    # New interface appeared
-                    change_msg = (
-                        f"{resource['name']} in {site_config['name']}: "
-                        f"{curr_iface['name']} appeared "
-                        f"oper={curr_iface['oper']} admin={curr_iface['admin']} at {timestamp_str}"
-                    )
-                elif curr_iface is None:
-                    # Interface disappeared
-                    change_msg = (
-                        f"{resource['name']} in {site_config['name']}: "
-                        f"{prev_iface['name']} disappeared "
-                        f"(was oper={prev_iface['oper']} admin={prev_iface['admin']}) at {timestamp_str}"
-                    )
-                else:
-                    # Status changed
-                    change_msg = (
-                        f"{resource['name']} in {site_config['name']}: "
-                        f"{curr_iface['name']} oper={curr_iface['oper']} admin={curr_iface['admin']} "
-                        f"(was oper={prev_iface['oper']} admin={prev_iface['admin']}) at {timestamp_str}"
-                    )
-
-                print(f"{prefix}##### PORT CHANGE: {change_msg} #####", file=sys.stderr)
-
-                # Per-interface notification throttling via prev_notified_count / prev_last_notified
-                secs_since_first_notification = 0
-                if prev_last_alarm_started:
-                    try:
-                        alarm_started_time = datetime.fromisoformat(prev_last_alarm_started)
-                        secs_since_first_notification = (now - alarm_started_time).total_seconds()
-                    except:
-                        pass
-
-                next_notification_delay_secs = calc_next_notification_delay_secs(
-                    notify_every_n_secs, after_every_n_notifications,
-                    secs_since_first_notification, prev_notified_count
-                )
-
-                should_notify = True
-                seconds_since_notify = False
-                if prev_last_notified:
-                    try:
-                        last_notified_time = datetime.fromisoformat(prev_last_notified)
-                        seconds_since_notify = (now - last_notified_time).total_seconds()
-                        should_notify = seconds_since_notify >= next_notification_delay_secs
-                    except:
-                        should_notify = True
-
-                if should_notify:
+                def _notify(msg: str) -> None:
+                    """Fire notification and advance throttle state."""
                     if monitor_email_enabled and 'outage_emails' in site_config:
                         for email_entry in site_config['outage_emails']:
                             notify_resource_outage_with_email(
-                                email_entry, site_config['name'], change_msg, site_config, 'outage')
-
+                                email_entry, site_config['name'], msg, site_config, 'outage')
                     if 'outage_webhooks' in site_config:
                         for webhook in site_config['outage_webhooks']:
-                            notify_resource_outage_with_webhook(
-                                webhook, site_config['name'], change_msg)
+                            notify_resource_outage_with_webhook(webhook, site_config['name'], msg)
 
-                    prev_last_notified = now.isoformat()
-                    prev_notified_count += 1
-                    prev_last_alarm_started = prev_last_alarm_started or now.isoformat()
-                else:
-                    if VERBOSE:
-                        if not seconds_since_notify:
-                            print(f"{prefix}skipping port change notification for {resource['name']} (notified {format_time_ago(prev_last_notified)} ago)")
-                        else:
-                            time_until_next_secs = next_notification_delay_secs - seconds_since_notify
-                            print(f"{prefix}skipping port change notification for {resource['name']} for {format_time_ago(time_until_next_secs)}")
+                # --- Status change detection ---
+                def _status_tuple(iface):
+                    """Comparable status fields, excluding macs."""
+                    if iface is None:
+                        return None
+                    return (iface['name'], iface['oper'], iface['admin'])
 
-    # Normal (not port) monitor
+                if _status_tuple(curr_iface) != _status_tuple(prev_iface):
+                    if prev_iface is None:
+                        change_msg = (
+                            f"{resource['name']} in {site_config['name']}: "
+                            f"{curr_iface['name']} appeared "
+                            f"oper={curr_iface['oper']} admin={curr_iface['admin']} at {timestamp_str}"
+                        )
+                    elif curr_iface is None:
+                        change_msg = (
+                            f"{resource['name']} in {site_config['name']}: "
+                            f"{prev_iface['name']} disappeared "
+                            f"(was oper={prev_iface['oper']} admin={prev_iface['admin']}) at {timestamp_str}"
+                        )
+                    else:
+                        change_msg = (
+                            f"{resource['name']} in {site_config['name']}: "
+                            f"{curr_iface['name']} oper={curr_iface['oper']} admin={curr_iface['admin']} "
+                            f"(was oper={prev_iface['oper']} admin={prev_iface['admin']}) at {timestamp_str}"
+                        )
+                    print(f"{prefix}##### PORT CHANGE: {change_msg} #####", file=sys.stderr)
+                    _notify(change_msg)
+
+                # --- MAC change detection (only when interface exists both sides) ---
+                if curr_iface is not None and prev_iface is not None:
+                    appeared    = sorted(set(curr_iface['macs']) - set(prev_iface['macs']))
+                    disappeared = sorted(set(prev_iface['macs']) - set(curr_iface['macs']))
+
+                    if appeared or disappeared:
+                        parts = []
+                        if appeared:
+                            parts.append(f"appeared=[{', '.join(appeared)}]")
+                        if disappeared:
+                            parts.append(f"disappeared=[{', '.join(disappeared)}]")
+                        mac_change_msg = (
+                            f"{resource['name']} in {site_config['name']}: "
+                            f"{curr_iface['name']} MAC change {' '.join(parts)} at {timestamp_str}"
+                        )
+                        print(f"{prefix}##### PORT MAC CHANGE: {mac_change_msg} #####", file=sys.stderr)
+                        _notify(mac_change_msg)
+
+    # Normal (non-ports) monitor up/down/recovery logic
     else:
         # Calculate new down_count, last_alarm_started, and last_notified
         if is_up:
@@ -3017,9 +2999,6 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
                     should_notify = True
 
             if should_notify:
-                # Check monitor-level email override
-                monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
-
                 # Determine notification type (first notification is 'outage', subsequent are 'reminder')
                 notification_type = 'outage' if prev_notified_count == 0 else 'reminder'
 
@@ -3061,11 +3040,7 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
         'is_up': is_up,
         'last_checked': now.isoformat(),
         'last_response_time_ms': last_response_time_ms,
-        'down_count': down_count,
-        'last_alarm_started': prev_last_alarm_started if is_up else last_alarm_started,
-        'last_notified': last_notified if is_up else (last_notified if should_notify else prev_last_notified),
         'last_successful_heartbeat': last_successful_heartbeat,
-        'notified_count': notified_count,
         'error_reason': error_reason,
         'last_config_checksum': resource_checksum,
     }
@@ -3073,6 +3048,11 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
     # Persist ports baseline for next poll
     if resource['type'] == 'ports' and current_ports_state:
         new_state['ports_state'] = current_ports_state
+    else:
+        new_state['down_count'] = down_count
+        new_state['last_alarm_started'] = prev_last_alarm_started if is_up else last_alarm_started
+        new_state['last_notified'] = last_notified if is_up else (last_notified if should_notify else prev_last_notified)
+        new_state['notified_count'] = notified_count
 
     update_state({resource['name']: new_state})
 

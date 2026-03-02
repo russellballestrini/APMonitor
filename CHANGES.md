@@ -12,6 +12,7 @@ Thread safe, reentrant, modifiable.
 # Release 1.2.10 (???)
 - Added MAC address to check_ports_resource
 - Refactored check_and_heartbeat_r logic to support separate 'ports' control flow
+- Added basic L2 MAC address / port change notification.
 
 # Release 1.2.9 (22-Feb-26): SNMP Ports Monitoring
 - Scaffolded up SNMP walk checking of ports up/down. Needs testing.
