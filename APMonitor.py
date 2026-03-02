@@ -2788,11 +2788,6 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
     # Calculate current config checksum
     resource_checksum = calc_config_checksum(resource)
 
-    # Get pacing config for this resource
-    notify_every_n_secs = resource.get('notify_every_n_secs', DEFAULT_NOTIFY_EVERY_N_SECS)
-    after_every_n_notifications = resource.get('after_every_n_notifications', DEFAULT_AFTER_EVERY_N_NOTIFICATIONS)
-    # print(f"{prefix} PACING: notify_every_n_secs={notify_every_n_secs} after_every_n_notifications={after_every_n_notifications}")
-
     # Get previous state for this resource
     with STATE_LOCK:
         prev_state = STATE.get(resource['name'], {}) or {}
@@ -2847,6 +2842,13 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
     now = datetime.now()
     timestamp_str = now.strftime('%I:%M %p %Z').lstrip('0').strip()
 
+    # Get pacing & notification config for this resource
+    notify_every_n_secs = resource.get('notify_every_n_secs', DEFAULT_NOTIFY_EVERY_N_SECS)
+    after_every_n_notifications = resource.get('after_every_n_notifications', DEFAULT_AFTER_EVERY_N_NOTIFICATIONS)
+    monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
+    # print(f"{prefix} PACING: notify_every_n_secs={notify_every_n_secs} after_every_n_notifications={after_every_n_notifications}")
+
+    # Ping heartbeat URL if required
     if is_up and 'heartbeat_url' in resource:
         # Determine if we should ping heartbeat
         should_heartbeat, seconds_since_heartbeat = is_heartbeat_due(resource, prev_last_successful_heartbeat, now)
@@ -2864,9 +2866,6 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
             if VERBOSE:
                 print(f"{prefix}PORTS baseline established for '{resource['name']}': {len(current_ports_state)} interfaces")
         else:
-            # Diff current vs baseline, fire one notification per changed interface
-            monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
-
             # Collect all interface indices across both states
             all_indices = set(prev_ports_state.keys()) | set(current_ports_state.keys())
 
@@ -2949,108 +2948,104 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
                             time_until_next_secs = next_notification_delay_secs - seconds_since_notify
                             print(f"{prefix}skipping port change notification for {resource['name']} for {format_time_ago(time_until_next_secs)}")
 
-    # Calculate new down_count, last_alarm_started, and last_notified
-    if is_up:
-        # Check if this is a transition from down to up
-        if not prev_is_up:
-            # Calculate outage duration
-            outage_duration = format_time_ago(prev_last_alarm_started)
-
-            # Send recovery notification
-            recovery_message = f"{resource['name']} in {site_config['name']} is UP ({resource['address']}) at {timestamp_str}, outage lasted {outage_duration}"
-            print(f"{prefix}##### RECOVERY: {recovery_message} #####", file=sys.stderr)
-
-            # Check monitor-level email override
-            monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
-
-            if monitor_email_enabled and 'outage_emails' in site_config:
-                for email_entry in site_config['outage_emails']:
-                    notify_resource_outage_with_email(email_entry, site_config['name'], recovery_message, site_config, 'recovery')
-
-            if 'outage_webhooks' in site_config:
-                for webhook in site_config['outage_webhooks']:
-                    notify_resource_outage_with_webhook(webhook, site_config['name'], recovery_message)
-
-            last_notified = now.isoformat()
-            notified_count = prev_notified_count
-        else:
-            last_notified = prev_last_notified
-            notified_count = prev_notified_count
-
-        down_count = 0
-        last_alarm_started = prev_last_alarm_started
+    # Normal (not port) monitor
     else:
-        down_count = prev_down_count + 1
-        # Set last_alarm_started on fresh DOWN transition, preserve on continued DOWN
-        if prev_is_up:  # Fresh transition from UP to DOWN
-            last_alarm_started = now.isoformat()
-            prev_last_notified = None
-            prev_notified_count = 0
-        else:  # Resource was already down, preserve existing alarm start time
+        # Calculate new down_count, last_alarm_started, and last_notified
+        if is_up:
+            # Check if this is a transition from down to up
+            if not prev_is_up:
+                # Calculate outage duration
+                outage_duration = format_time_ago(prev_last_alarm_started)
+
+                # Send recovery notification
+                recovery_message = f"{resource['name']} in {site_config['name']} is UP ({resource['address']}) at {timestamp_str}, outage lasted {outage_duration}"
+                print(f"{prefix}##### RECOVERY: {recovery_message} #####", file=sys.stderr)
+
+                if monitor_email_enabled and 'outage_emails' in site_config:
+                    for email_entry in site_config['outage_emails']:
+                        notify_resource_outage_with_email(email_entry, site_config['name'], recovery_message, site_config, 'recovery')
+
+                if 'outage_webhooks' in site_config:
+                    for webhook in site_config['outage_webhooks']:
+                        notify_resource_outage_with_webhook(webhook, site_config['name'], recovery_message)
+
+                last_notified = now.isoformat()
+                notified_count = prev_notified_count
+            else:
+                last_notified = prev_last_notified
+                notified_count = prev_notified_count
+
+            down_count = 0
             last_alarm_started = prev_last_alarm_started
-
-        if prev_is_up:
-            error_message = f"{resource['name']} in {site_config['name']} new outage: {error_reason} ({resource['address']}) at {timestamp_str}, down for {format_time_ago(last_alarm_started)}"
-            print(f"{prefix}##### NEW OUTAGE: {error_message} #####", file=sys.stderr)
         else:
-            error_message = f"{resource['name']} in {site_config['name']} is down: {error_reason} ({resource['address']}) at {timestamp_str}, down for {format_time_ago(last_alarm_started)}"
-            print(f"{prefix}##### DOWN: {error_message} #####", file=sys.stderr)
+            down_count = prev_down_count + 1
+            # Set last_alarm_started on fresh DOWN transition, preserve on continued DOWN
+            if prev_is_up:  # Fresh transition from UP to DOWN
+                last_alarm_started = now.isoformat()
+                prev_last_notified = None
+                prev_notified_count = 0
+            else:  # Resource was already down, preserve existing alarm start time
+                last_alarm_started = prev_last_alarm_started
 
-        # Determine if we should send notifications
-        notify_every_n_secs = resource.get('notify_every_n_secs', DEFAULT_NOTIFY_EVERY_N_SECS)
-        after_every_n_notifications = resource.get('after_every_n_notifications', DEFAULT_AFTER_EVERY_N_NOTIFICATIONS)
-        should_notify = True
+            if prev_is_up:
+                error_message = f"{resource['name']} in {site_config['name']} new outage: {error_reason} ({resource['address']}) at {timestamp_str}, down for {format_time_ago(last_alarm_started)}"
+                print(f"{prefix}##### NEW OUTAGE: {error_message} #####", file=sys.stderr)
+            else:
+                error_message = f"{resource['name']} in {site_config['name']} is down: {error_reason} ({resource['address']}) at {timestamp_str}, down for {format_time_ago(last_alarm_started)}"
+                print(f"{prefix}##### DOWN: {error_message} #####", file=sys.stderr)
 
-        # Calculate seconds since first notification of current outage
-        secs_since_first_notification = 0
-        if last_alarm_started:
-            try:
-                alarm_started_time = datetime.fromisoformat(last_alarm_started)
-                secs_since_first_notification = (now - alarm_started_time).total_seconds()
-            except:
-                secs_since_first_notification = 0
+            should_notify = True
 
-        # Calculate should_notify & next_notification_delay_secs
-        next_notification_delay_secs = calc_next_notification_delay_secs(notify_every_n_secs, after_every_n_notifications, secs_since_first_notification, prev_notified_count)
-        seconds_since_notify = False
-        if prev_last_notified:
-            try:
-                last_notified_time = datetime.fromisoformat(prev_last_notified)
-                seconds_since_notify = (now - last_notified_time).total_seconds()
-                should_notify = seconds_since_notify >= next_notification_delay_secs
-            except:
-                should_notify = True
+            # Calculate seconds since first notification of current outage
+            secs_since_first_notification = 0
+            if last_alarm_started:
+                try:
+                    alarm_started_time = datetime.fromisoformat(last_alarm_started)
+                    secs_since_first_notification = (now - alarm_started_time).total_seconds()
+                except:
+                    secs_since_first_notification = 0
 
-        if should_notify:
-            # Check monitor-level email override
-            monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
+            # Calculate should_notify & next_notification_delay_secs
+            next_notification_delay_secs = calc_next_notification_delay_secs(notify_every_n_secs, after_every_n_notifications, secs_since_first_notification, prev_notified_count)
+            seconds_since_notify = False
+            if prev_last_notified:
+                try:
+                    last_notified_time = datetime.fromisoformat(prev_last_notified)
+                    seconds_since_notify = (now - last_notified_time).total_seconds()
+                    should_notify = seconds_since_notify >= next_notification_delay_secs
+                except:
+                    should_notify = True
 
-            # Determine notification type (first notification is 'outage', subsequent are 'reminder')
-            notification_type = 'outage' if prev_notified_count == 0 else 'reminder'
+            if should_notify:
+                # Check monitor-level email override
+                monitor_email_enabled = to_natural_language_boolean(resource.get('email', True))
 
-            # Send outage notifications
-            if monitor_email_enabled and 'outage_emails' in site_config:
-                for email_entry in site_config['outage_emails']:
-                    notify_resource_outage_with_email(email_entry, site_config['name'], error_message, site_config, notification_type)
+                # Determine notification type (first notification is 'outage', subsequent are 'reminder')
+                notification_type = 'outage' if prev_notified_count == 0 else 'reminder'
 
-            if 'outage_webhooks' in site_config:
-                for webhook in site_config['outage_webhooks']:
-                    notify_resource_outage_with_webhook(webhook, site_config['name'], error_message)
+                # Send outage notifications
+                if monitor_email_enabled and 'outage_emails' in site_config:
+                    for email_entry in site_config['outage_emails']:
+                        notify_resource_outage_with_email(email_entry, site_config['name'], error_message, site_config, notification_type)
 
-            # Record notification time and increment count
-            last_notified = now.isoformat()
-            notified_count = prev_notified_count + 1
-        else:
-            if VERBOSE:
-                if not seconds_since_notify:
-                    print(f"{prefix}skipping {resource['name']} notification (notified {format_time_ago(prev_last_notified)} ago)")
-                else:
-                    time_until_next_secs = next_notification_delay_secs - seconds_since_notify
-                    print(f"{prefix}skipping {resource['name']} notification for {format_time_ago(time_until_next_secs)} (notified {format_time_ago(prev_last_notified)} ago)")
+                if 'outage_webhooks' in site_config:
+                    for webhook in site_config['outage_webhooks']:
+                        notify_resource_outage_with_webhook(webhook, site_config['name'], error_message)
 
-            # Keep previous notification time and count
-            last_notified = prev_last_notified
-            notified_count = prev_notified_count
+                # Record notification time and increment count
+                last_notified = now.isoformat()
+                notified_count = prev_notified_count + 1
+            else:
+                if VERBOSE:
+                    if not seconds_since_notify:
+                        print(f"{prefix}skipping {resource['name']} notification (notified {format_time_ago(prev_last_notified)} ago)")
+                    else:
+                        time_until_next_secs = next_notification_delay_secs - seconds_since_notify
+                        print(f"{prefix}skipping {resource['name']} notification for {format_time_ago(time_until_next_secs)} (notified {format_time_ago(prev_last_notified)} ago)")
+
+                # Keep previous notification time and count
+                last_notified = prev_last_notified
+                notified_count = prev_notified_count
 
     # Update RRD database for MRTG (availability monitors only)
     if RRD_ENABLED and resource['type'] not in ('snmp', 'ports'):
