@@ -1557,7 +1557,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
   - ~~TCP & UDP port monitoring~~ (completed in v1.2.0)
   - ~~SNMP w/defaults for managed switches and system performance tuning~~ (completed in v1.2.5)
   - ~~Switch port status monitoring (`ports` type) with per-interface silence windows~~ (completed in v1.2.9)
-  - Add automated MAC address pinning to port status monitoring
+  - ~~Add automated MAC address pinning to port status monitoring~~ (completed in v1.2.10)
   - Update docs to provide webhook examples for Pushover, Slack & Discord
 
 - Add additional outputs: 
