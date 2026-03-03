@@ -10,6 +10,7 @@ Integrates w/Site24x7 heartbeat monitoring for failover alerts + MRTG + Slack & 
 Thread safe, reentrant, modifiable.
 
 # Release 1.2.12 (???): ??? 
+- Implemented individual L2 port pinning
 
 # Release 1.2.11 (03-Mar-26): Documentation Update
 

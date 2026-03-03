@@ -490,7 +490,7 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 'type', 'name', 'address', 'check_every_n_secs', 'notify_every_n_secs',
                 'notify_on_down_every_n_secs', 'after_every_n_notifications', 'heartbeat_url',
                 'heartbeat_every_n_secs', 'expect', 'ssl_fingerprint', 'ignore_ssl_expiry', 'email',
-                'send', 'content_type', 'community', 'percentile'
+                'send', 'content_type', 'community', 'percentile', 'port', 'mac', 'always_up'
             }
             unrecognized_monitor = set(monitor.keys()) - valid_monitor_params
             if unrecognized_monitor:
@@ -507,7 +507,7 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
             monitor_names.add(name)
 
             # Validate type field
-            valid_types = ['ping', 'http', 'quic', 'tcp', 'udp', 'snmp', 'ports']
+            valid_types = ['ping', 'http', 'quic', 'tcp', 'udp', 'snmp', 'ports', 'port']
             if monitor['type'] not in valid_types:
                 raise ConfigError(f"Monitor {i} (name: {monitor.get('name', 'unknown')}): invalid type '{monitor['type']}', must be one of {valid_types}")
 
@@ -738,6 +738,57 @@ def print_and_exit_on_bad_config(config: Dict[str, Any]) -> None:
                 # 'percentile' not allowed for ports
                 if 'percentile' in monitor:
                     raise ConfigError(f"Monitor {i} (name: {name}): 'percentile' field not valid for ports monitors")
+
+            elif monitor_type == 'port':
+                # Validate URL/URI with snmp:// scheme (port uses SNMP transport)
+                parsed = urlparse(address)
+                if parsed.scheme != 'snmp':
+                    raise ConfigError(f"Monitor {i} (name: {name}): port monitor must use 'snmp://' scheme, got '{address}'")
+                if not parsed.netloc:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'address' must include hostname/IP, got '{address}'")
+
+                # Validate hostname or IP address (IPv4 or IPv6)
+                hostname = parsed.hostname
+                if hostname:
+                    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+                    ipv6_pattern = r'^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$'
+                    hostname_pattern = r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'
+
+                    if not (re.match(ipv4_pattern, hostname) or re.match(ipv6_pattern, hostname) or re.match(hostname_pattern, hostname)):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'address' hostname must be valid hostname, IPv4 or IPv6 address, got '{hostname}'")
+
+                # 'port' (ifIndex) is required
+                if 'port' not in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'port' (ifIndex) is required for port monitors")
+                if not isinstance(monitor['port'], int) or monitor['port'] < 0:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'port' must be a non-negative integer (ifIndex)")
+
+                # 'mac' is required
+                if 'mac' not in monitor:
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'mac' (pinned MAC address) is required for port monitors")
+                if not isinstance(monitor['mac'], str):
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'mac' must be a string")
+                if not re.match(r'^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$', monitor['mac']):
+                    raise ConfigError(f"Monitor {i} (name: {name}): 'mac' must be a valid MAC address (XX:XX:XX:XX:XX:XX), got '{monitor['mac']}'")
+
+                # 'always_up' is optional boolean
+                if 'always_up' in monitor:
+                    try:
+                        to_natural_language_boolean(monitor['always_up'])
+                    except ValueError as e:
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'always_up' field: {e}")
+
+                # Validate optional 'community' string
+                if 'community' in monitor:
+                    if not isinstance(monitor['community'], str):
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'community' must be a string")
+                    if len(monitor['community']) == 0:
+                        raise ConfigError(f"Monitor {i} (name: {name}): 'community' must not be empty")
+
+                # Fields not valid for port
+                for forbidden in ('expect', 'ssl_fingerprint', 'ignore_ssl_expiry', 'send', 'content_type', 'percentile'):
+                    if forbidden in monitor:
+                        raise ConfigError(f"Monitor {i} (name: {name}): '{forbidden}' field not valid for port monitors")
 
             # Validate heartbeat_url if present (valid for all monitor types)
             if 'heartbeat_url' in monitor:
@@ -2055,11 +2106,144 @@ def check_ports_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Dict[
     return None, current_ports_state
 
 
+def check_port_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Poll a single switch port by ifIndex for oper status and MAC address.
+
+    Uses IF-MIB for oper/admin status and Q-BRIDGE-MIB (RFC 2674) dot1qTpFdbTable for learned MACs.
+    Q-BRIDGE-MIB OID tail encodes <vlan_id>.<6 MAC octets>, value is bridge port number (= ifIndex).
+
+    Alarm logic:
+      always_up=True:  alarm if oper!=up OR pinned MAC absent OR wrong MAC on port
+      always_up=False: alarm only if a non-pinned MAC is present on the port
+
+    Returns (error_msg, current_oper, current_mac) where:
+    - error_msg:    None if no alarm condition, string describing the fault
+    - current_oper: IF-MIB oper status string (or None on SNMP failure)
+    - current_mac:  MAC found on port (or None if absent / SNMP failure)
+    """
+    try:
+        from easysnmp import Session
+    except ImportError as e:
+        error_msg = f"easysnmp library import failed: {e} (try: pip install easysnmp)"
+        prefix = getattr(thread_local, 'prefix', '')
+        print(f"{prefix}PORT check FAILED: {error_msg}", file=sys.stderr)
+        return error_msg, None, None
+
+    prefix = getattr(thread_local, 'prefix', '')
+    address = resource['address']
+    name = resource['name']
+    if_index = str(resource['port'])  # ifIndex as string for OID suffix
+    pinned_mac = resource['mac'].upper()
+    always_up = to_natural_language_boolean(resource.get('always_up', False))
+
+    # Parse SNMP transport config
+    parsed = urlparse(address)
+    community = resource.get('community') or parsed.username or 'public'
+    hostname = parsed.hostname
+    port = parsed.port or 161
+
+    if not hostname:
+        error_msg = "port monitor address must include hostname"
+        print(f"{prefix}PORT check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg, None, None
+
+    # IF-MIB OIDs
+    OID_IF_OPER_STATUS = '1.3.6.1.2.1.2.2.1.8'  # IF-MIB::ifOperStatus
+    OID_IF_ADMIN_STATUS = '1.3.6.1.2.1.2.2.1.7'  # IF-MIB::ifAdminStatus
+
+    # Q-BRIDGE-MIB OIDs (RFC 2674) — same semantics as check_ports_resource
+    # OID tail: <vlan_id>.<6 MAC octets>, value = bridge port number (= ifIndex on this switch family)
+    OID_DOT1Q_TP_FDB_PORT = '1.3.6.1.2.1.17.7.1.2.2.1.2'  # dot1qTpFdbPort
+    OID_DOT1Q_TP_FDB_STATUS = '1.3.6.1.2.1.17.7.1.2.2.1.3'  # dot1qTpFdbStatus - 3=learned
+
+    OPER_STATUS = {
+        '1': 'up', '2': 'down', '3': 'testing',
+        '4': 'unknown', '5': 'dormant', '6': 'notPresent', '7': 'lowerLayerDown'
+    }
+    ADMIN_STATUS = {'1': 'up', '2': 'down', '3': 'testing'}
+    FDB_STATUS_LEARNED = '3'
+
+    try:
+        session = Session(
+            hostname=hostname,
+            community=community,
+            version=2,
+            remote_port=port,
+            timeout=MAX_TRY_SECS,
+            retries=MAX_RETRIES - 1
+        )
+
+        oper_raw = session.get(f"{OID_IF_OPER_STATUS}.{if_index}").value
+        admin_raw = session.get(f"{OID_IF_ADMIN_STATUS}.{if_index}").value
+        oper = OPER_STATUS.get(oper_raw, oper_raw)
+        admin = ADMIN_STATUS.get(admin_raw, admin_raw)
+
+        if VERBOSE:
+            print(f"{prefix}PORT poll ifIndex={if_index}: oper={oper} admin={admin}")
+
+    except Exception as e:
+        error_msg = f"SNMP failed: {e}"
+        print(f"{prefix}PORT check FAILED for '{name}': {error_msg}", file=sys.stderr)
+        return error_msg, None, None
+
+    # MAC walk — non-fatal, mirrors check_ports_resource pattern
+    # dot1dTpFdbTable returns 0 entries on VLAN-aware switches; Q-BRIDGE-MIB is correct
+    current_mac = None
+    try:
+        fdb_port_items = session.walk(OID_DOT1Q_TP_FDB_PORT)
+        fdb_status_items = session.walk(OID_DOT1Q_TP_FDB_STATUS)
+
+        # Index status by 7-octet OID tail for O(1) lookup
+        fdb_status_by_oid = {
+            '.'.join(item.oid.split('.')[-7:]): item.value
+            for item in fdb_status_items
+        }
+
+        for item in fdb_port_items:
+            oid_tail = '.'.join(item.oid.split('.')[-7:])  # e.g. "1.36.90.76.31.80.156"
+            mac_octets = oid_tail.split('.')[1:]  # strip vlan_id, keep 6 MAC octets
+            port_ifindex = item.value  # = ifIndex directly on this switch family
+
+            if port_ifindex != if_index:
+                continue
+            if fdb_status_by_oid.get(oid_tail) != FDB_STATUS_LEARNED:
+                continue
+            if len(mac_octets) != 6:
+                continue
+
+            current_mac = ':'.join(f'{int(o):02X}' for o in mac_octets)
+            break  # one MAC per pinned port; take first learned
+
+        if VERBOSE:
+            print(f"{prefix}PORT mac on ifIndex={if_index}: {current_mac or 'none'} (pinned={pinned_mac})")
+
+    except Exception as e:
+        # Non-fatal: proceed with current_mac=None, consistent with check_ports_resource MAC walk failure
+        if VERBOSE:
+            print(f"{prefix}PORT Q-BRIDGE FDB walk failed for '{name}' (MAC unavailable): {e}")
+
+    # --- Alarm evaluation ---
+    if always_up:
+        if oper != 'up':
+            return f"port ifIndex={if_index} {pinned_mac} is {oper} (admin={admin})", oper, current_mac
+        if current_mac is None:
+            return f"port ifIndex={if_index} is up but pinned MAC {pinned_mac} absent", oper, current_mac
+        if current_mac != pinned_mac:
+            return f"port ifIndex={if_index} wrong MAC: expected {pinned_mac}, got {current_mac}", oper, current_mac
+    else:
+        # always_up=False: alarm only when a non-pinned MAC is present on the port
+        if current_mac is not None and current_mac != pinned_mac:
+            return f"port ifIndex={if_index} wrong MAC: expected {pinned_mac}, got {current_mac}", oper, current_mac
+
+    return None, oper, current_mac
+
+
 def check_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], Optional[Dict]]:
     """Check resource with retry logic and response time tracking.
 
     Returns (error_msg, response_time_ms, ports_state) where ports_state is only
-    populated for 'ports' monitors, None for all other types.
+    populated for 'ports' and 'port' monitors, None for all other types.
+    For 'port' monitors, ports_state carries {'oper': oper, 'mac': mac}.
     """
     error_msg = None
 
@@ -2074,6 +2258,9 @@ def check_resource(resource: Dict[str, Any]) -> Tuple[Optional[str], Optional[in
             ports_state = None
         elif resource['type'] == 'ports':
             error_msg, ports_state = check_ports_resource(resource)
+        elif resource['type'] == 'port':
+            error_msg, oper, mac = check_port_resource(resource)
+            ports_state = {'oper': oper, 'mac': mac}
         elif resource['type'] in ('http', 'quic', 'tcp', 'udp'):
             error_msg = check_url_resource(resource)
             ports_state = None
@@ -2930,7 +3117,7 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
                         print(f"{prefix}##### PORT MAC CHANGE: {mac_change_msg} #####", file=sys.stderr)
                         _notify(mac_change_msg)
 
-    # Normal (non-ports) monitor up/down/recovery logic
+    # Normal up/down/recovery logic (all types except 'ports')
     else:
         # Calculate new down_count, last_alarm_started, and last_notified
         if is_up:
@@ -3027,7 +3214,7 @@ def check_and_heartbeat_r(resource: Dict[str, Any], site_config: Dict[str, Any])
                 notified_count = prev_notified_count
 
     # Update RRD database for MRTG (availability monitors only)
-    if RRD_ENABLED and resource['type'] not in ('snmp', 'ports'):
+    if RRD_ENABLED and resource['type'] not in ('snmp', 'ports', 'port'):
         rrd_path = get_rrd_path(resource['name'])
         if VERBOSE > 1:
             print(f"{prefix}updating RRD database for {rrd_path} w/ {now}, {last_response_time_ms}, {is_up}")
