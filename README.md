@@ -348,6 +348,18 @@ site:
   after_every_n_notifications: 1
 
 monitors:
+  # Single-port MAC-pinning monitor
+  - type: port
+    name: "switch-port0"
+    address: snmp://192.168.1.6
+    community: TellusionLab
+    check_every_n_secs: 10
+    notify_every_n_secs: 60
+    after_every_n_notifications: 6
+    port: 0
+    mac: 18:E8:29:45:F8:F7
+    always_up: yes
+
   # Switch port status monitoring with per-interface silence windows
   - type: ports
     name: office-switch
@@ -563,6 +575,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - `udp`: UDP datagram send/receive check
   - `snmp`: SNMP network device monitoring (interface bandwidth, TCP retransmits)
   - `ports`: SNMP switch port status monitor (tracks interface oper/admin state and MAC address changes with per-interface silence windows)
+  - `port`: SNMP single-port MAC-pinning monitor (pins one switch port to one MAC address; fires alerts on wrong MAC, port down, or MAC absence depending on `always_up`)
 
 - **`name`** (string): Unique identifier for this monitor. Must be unique across all monitors in the configuration. Used in notifications and state tracking.
 
@@ -573,6 +586,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - For `udp`: URL with `udp://` scheme, hostname/IP, and port (e.g., `udp://192.168.1.1:161`)
   - For `snmp`: URL with `snmp://` scheme and hostname/IP (e.g., `snmp://192.168.1.1` or `snmp://192.168.1.1:161`)
   - For `ports`: URL with `snmp://` scheme and hostname/IP — uses SNMP transport, same format as `snmp` (e.g., `snmp://192.168.1.6`)
+  - For `port`: URL with `snmp://` scheme and hostname/IP — uses SNMP transport, same format as `ports` (e.g., `snmp://192.168.1.6`)
 
 ### Optional Fields (All Monitor Types)
 
@@ -868,6 +882,74 @@ With the above config, the silence window is `3600 × 1 = 3600` seconds (1 hour)
 ##### PORT MAC CHANGE: office-switch in HomeLab: GigabitEthernet0/1 MAC change disappeared=[AA:BB:CC:DD:EE:FF] appeared=[11:22:33:44:55:66] at 2:25 PM #####
 ```
 
+### Port Monitor Specific Fields
+
+The `port` monitor type polls a single switch port by ifIndex via SNMPv2c, pinning it to a specific MAC address. It is orthogonal to the `ports` type: `ports` watches all interfaces on a device holistically; `port` watches one interface with a hard MAC binding.
+
+**Required Fields:**
+- **`type`**: Must be `port`
+- **`address`**: URL with `snmp://` scheme and hostname/IP — same format as `snmp`/`ports` (e.g., `snmp://192.168.1.6`)
+- **`port`** (integer): ifIndex of the switch port to monitor. Must be a non-negative integer. This is the raw ifIndex as returned by IF-MIB, not a zero-based port number.
+- **`mac`** (string): Pinned MAC address in `XX:XX:XX:XX:XX:XX` format (case-insensitive). This is the expected device on the port.
+
+**Optional Fields:**
+
+- **`community`** (string, optional): SNMP community string. Default: `public`
+
+- **`always_up`** (boolean/integer/string, optional): Controls alarm semantics. Default: `false`
+
+**Alarm Logic:**
+
+| Condition | `always_up: true` | `always_up: false` |
+|---|---|---|
+| Port oper≠up | Alarm | No alarm |
+| Pinned MAC absent from port | Alarm | No alarm |
+| Wrong MAC present on port | Alarm | Alarm |
+| All clear | Recovery | Recovery |
+
+- **`always_up: true`**: The port must be operationally up AND the pinned MAC must be present AND be the only learned MAC. Any deviation alarms.
+- **`always_up: false`**: Only alarms when a non-pinned MAC is present on the port. Port down and MAC absence are silent (useful for ports that legitimately go idle).
+
+**Recovery:** A recovery notification fires whenever all alarm conditions clear.
+
+**MAC Resolution:**
+
+Uses Q-BRIDGE-MIB (RFC 2674) `dot1qTpFdbTable` — the correct table for VLAN-aware managed switches. The classic `dot1dTpFdbTable` (BRIDGE-MIB) returns zero entries on VLAN-aware hardware because its FDB is partitioned per VLAN. MAC walk failure is non-fatal: monitoring continues with `current_mac=None`, which only triggers alarms when `always_up=true` (MAC absent condition).
+
+**State Tracking:**
+
+The state file stores one key per `port` monitor:
+- `port_state`: dict of `{oper, mac}` from last successful poll — used for observability and future state transition logging
+
+**Field Restrictions:**
+- `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, `content_type`, `percentile` are not valid for `port` monitors
+- `port` monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
+- RRD/MRTG graph generation is not supported for `port` monitors
+
+**Example Configuration:**
+```yaml
+- type: port
+  name: "switch-port0"
+  address: snmp://192.168.1.6
+  community: TellusionLab
+  check_every_n_secs: 10
+  notify_every_n_secs: 60
+  after_every_n_notifications: 6
+  port: 0
+  mac: 18:E8:29:45:F8:F7
+  always_up: yes
+```
+
+With `always_up: yes`, this fires an alarm if ifIndex 0 is not oper=up, if `18:E8:29:45:F8:F7` is absent, or if any other MAC is present on that port.
+
+**Sample Notification Output:**
+```
+##### NEW OUTAGE: switch-port0 in HomeLab new outage: port ifIndex=0 18:E8:29:45:F8:F7 is down (admin=up) (snmp://192.168.1.6) at 2:15 PM, down for 0 secs #####
+##### NEW OUTAGE: switch-port0 in HomeLab new outage: port ifIndex=0 is up but pinned MAC 18:E8:29:45:F8:F7 absent (snmp://192.168.1.6) at 2:16 PM, down for 0 secs #####
+##### NEW OUTAGE: switch-port0 in HomeLab new outage: port ifIndex=0 wrong MAC: expected 18:E8:29:45:F8:F7, got AA:BB:CC:DD:EE:FF (snmp://192.168.1.6) at 2:17 PM, down for 0 secs #####
+##### RECOVERY: switch-port0 in HomeLab is UP (snmp://192.168.1.6) at 2:18 PM, outage lasted 1 mins 3 secs #####
+```
+
 ### Example Configurations
 
 **Ping Monitor:**
@@ -984,6 +1066,20 @@ With the above config, the silence window is `3600 × 1 = 3600` seconds (1 hour)
   after_every_n_notifications: 1
 ```
 
+**Single-Port MAC-Pinning Monitor:**
+```yaml
+- type: port
+  name: "switch-port0"
+  address: snmp://192.168.1.6
+  community: TellusionLab
+  check_every_n_secs: 10
+  notify_every_n_secs: 60
+  after_every_n_notifications: 6
+  port: 0
+  mac: 18:E8:29:45:F8:F7
+  always_up: yes
+```
+
 ### Validation Rules
 
 The configuration validator enforces these rules:
@@ -1017,6 +1113,11 @@ The configuration validator enforces these rules:
 27. `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, `content_type`, and `percentile` are not allowed for `ports` monitors
 28. `ports` monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
 29. `ports` monitors establish a silent baseline on first poll and alert on per-interface state changes thereafter
+30. `port` monitors must use `snmp://` scheme (SNMP transport)
+31. `port` monitors require `port` (non-negative integer ifIndex) and `mac` (valid `XX:XX:XX:XX:XX:XX` address)
+32. `always_up` is optional for `port` monitors and accepts boolean or string values
+33. `expect`, `ssl_fingerprint`, `ignore_ssl_expiry`, `send`, `content_type`, `percentile` are not allowed for `port` monitors
+34. `port` monitors support `heartbeat_url` and `heartbeat_every_n_secs` like other monitor types
 
 # Dependencies
 
@@ -1034,7 +1135,7 @@ sudo pip3 install --break-system-packages PyYAML requests pyOpenSSL urllib3 aioq
 
 **Note**: 
 - The `aioquic` package is required for QUIC/HTTP3 monitoring support. If you don't plan to use `type: quic` monitors, you can omit this dependency.
-- The `easysnmp` package and `libsnmp-dev` system library are required for SNMP monitoring support. If you don't plan to use `type: snmp` or `type: ports` monitors, you can omit these dependencies.
+- The `easysnmp` package and `libsnmp-dev` system library are required for SNMP monitoring support. If you don't plan to use `type: snmp`, `type: ports`, or `type: port` monitors, you can omit these dependencies.
 
 # Example invocation:
 ```
@@ -1282,7 +1383,8 @@ The state file tracks:
 - `notified_count`: Number of notifications sent for current outage
 - `error_reason`: Last error message
 - `last_config_checksum`: SHA-256 hash of monitor configuration (detects config changes)
-- `ports_state`: (ports monitors only) committed baseline — dict of `{if_index: {name, oper, admin, macs}}` per interface; `macs` is a sorted list of learned MAC addresses in `AA:BB:CC:DD:EE:FF` format sourced from Q-BRIDGE-MIB; advances to current state on each successful poll
+- `ports_state`: (`ports` monitors only) committed baseline — dict of `{if_index: {name, oper, admin, macs}}` per interface; `macs` is a sorted list of learned MAC addresses in `AA:BB:CC:DD:EE:FF` format sourced from Q-BRIDGE-MIB; advances to current state on each successful poll
+- `port_state`: (`port` monitors only) last polled state — dict of `{oper, mac}` where `oper` is the IF-MIB operational status string and `mac` is the learned MAC address (or `None` if absent/unavailable)
 
 
 **Note**: If using `/tmp/statefile.json`, the state file is cleared on system reboot. This resets all monitoring history but doesn't affect functionality—monitoring resumes normally on first run.
@@ -1389,7 +1491,7 @@ sudo pip3 install PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
 - `pyOpenSSL` - SSL certificate verification and fingerprint checking
 - `urllib3` - HTTP connection pooling (dependency of requests)
 - `aioquic` - QUIC/HTTP3 protocol support (required for `type: quic` monitors)
-- `easysnmp` - SNMP monitoring support (required for `type: snmp` and `type: ports` monitors)
+- `easysnmp` - SNMP monitoring support (required for `type: snmp`, `type: ports`, and `type: port` monitors)
 
 ## Step 3: Create Monitoring User
 
@@ -1562,7 +1664,7 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
   - ~~SNMP w/defaults for managed switches and system performance tuning~~ (completed in v1.2.5)
   - ~~Switch port status monitoring (`ports` type) with per-interface silence windows~~ (completed in v1.2.9)
   - ~~Add automated MAC address pinning to port status monitoring~~ (completed in v1.2.10)
-  - Add individual port monitor with repeating alerts
+  - ~~Add individual port monitor with MAC-pinning and `always_up` alarm semantics~~ (completed in v1.2.12)
   - Update docs to provide webhook examples for Pushover, Slack & Discord
 
 - Add additional outputs: 
