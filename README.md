@@ -560,7 +560,7 @@ The `monitors` section is a list of resources to monitor. Each monitor defines w
   - `tcp`: TCP port connectivity and protocol check
   - `udp`: UDP datagram send/receive check
   - `snmp`: SNMP network device monitoring (interface bandwidth, TCP retransmits)
-  - `ports`: SNMP switch port status monitor (tracks interface oper/admin state changes with per-interface silence windows)
+  - `ports`: SNMP switch port status monitor (tracks interface oper/admin state and MAC address changes with per-interface silence windows)
 
 - **`name`** (string): Unique identifier for this monitor. Must be unique across all monitors in the configuration. Used in notifications and state tracking.
 
@@ -802,7 +802,7 @@ Interface names are sanitized to alphanumeric + underscore, truncated to 15 char
 
 ### Ports Monitor Specific Fields
 
-The `ports` monitor type polls a managed network switch or router via SNMPv2c to track the operational and administrative status of every interface. It fires one notification per changed interface and enforces per-interface silence windows to suppress flap noise.
+The `ports` monitor type polls a managed network switch or router via SNMPv2c to track the operational and administrative status of every interface, and the set of learned MAC addresses on each port. It fires one notification per changed interface and enforces per-interface silence windows to suppress flap noise.
 
 **Required Fields:**
 - **`type`**: Must be `ports`
@@ -829,12 +829,13 @@ This means if an interface flaps down then back up during the silence window, bo
 - **IF-MIB::ifDescr** (1.3.6.1.2.1.2.2.1.2) — Interface name/description
 - **IF-MIB::ifOperStatus** (1.3.6.1.2.1.2.2.1.8) — Operational status (`up`/`down`/`testing`/`unknown`/`dormant`/`notPresent`/`lowerLayerDown`)
 - **IF-MIB::ifAdminStatus** (1.3.6.1.2.1.2.2.1.7) — Administrative status (`up`/`down`/`testing`)
+- **Q-BRIDGE-MIB::dot1qTpFdbPort** (1.3.6.1.2.1.17.7.1.2.2.1.2) — Bridge port number per MAC (OID tail encodes `<vlan_id>.<6 MAC octets>`)
+- **Q-BRIDGE-MIB::dot1qTpFdbStatus** (1.3.6.1.2.1.17.7.1.2.2.1.3) — MAC entry status; only `learned` (3) entries are tracked
 
 **State Tracking:**
 
-The state file stores two keys per `ports` monitor:
-- `ports_state`: committed baseline — `{if_index: {name, oper, admin}}` per interface; only advances after the silence window expires
-- `ports_pending`: per-interface silence window records — `{if_index: {first_notified_at, secs_since_first_notification, current_notification_index, baseline_iface}}`
+The state file stores one key per `ports` monitor:
+- `ports_state`: committed baseline — dict of `{if_index: {name, oper, admin, macs}}` per interface; `macs` is a sorted list of learned MAC addresses in `AA:BB:CC:DD:EE:FF` format sourced from Q-BRIDGE-MIB; advances to current state on each successful poll
 
 **Field Restrictions:**
 - `expect`, `ssl_fingerprint`, `ignore_ssl_expiry` are not valid for `ports` monitors
@@ -861,6 +862,8 @@ With the above config, the silence window is `3600 × 1 = 3600` seconds (1 hour)
 ##### PORT CHANGE: office-switch in HomeLab: GigabitEthernet0/2 oper=down admin=up (was oper=up admin=up) at 2:15 PM #####
 ##### PORT CHANGE: office-switch in HomeLab: GigabitEthernet0/5 appeared oper=up admin=up at 2:15 PM #####
 ##### PORT CHANGE: office-switch in HomeLab: GigabitEthernet0/3 disappeared (was oper=up admin=up) at 2:15 PM #####
+##### PORT MAC CHANGE: office-switch in HomeLab: GigabitEthernet0/1 MAC change appeared=[AA:BB:CC:DD:EE:FF] at 2:22 PM #####
+##### PORT MAC CHANGE: office-switch in HomeLab: GigabitEthernet0/1 MAC change disappeared=[AA:BB:CC:DD:EE:FF] appeared=[11:22:33:44:55:66] at 2:25 PM #####
 ```
 
 ### Example Configurations
@@ -1277,8 +1280,7 @@ The state file tracks:
 - `notified_count`: Number of notifications sent for current outage
 - `error_reason`: Last error message
 - `last_config_checksum`: SHA-256 hash of monitor configuration (detects config changes)
-- `ports_state`: (ports monitors only) committed baseline — dict of `{if_index: {name, oper, admin}}` per interface, advances only after silence window expires
-- `ports_pending`: (ports monitors only) per-interface silence window state — dict of `{if_index: {first_notified_at, secs_since_first_notification, current_notification_index, baseline_iface}}` tracking active silence windows
+- `ports_state`: (ports monitors only) committed baseline — dict of `{if_index: {name, oper, admin, macs}}` per interface; `macs` is a sorted list of learned MAC addresses in `AA:BB:CC:DD:EE:FF` format sourced from Q-BRIDGE-MIB; advances to current state on each successful poll
 
 
 **Note**: If using `/tmp/statefile.json`, the state file is cleared on system reboot. This resets all monitoring history but doesn't affect functionality—monitoring resumes normally on first run.
