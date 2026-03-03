@@ -1562,11 +1562,13 @@ sudo pip3 uninstall -y PyYAML requests pyOpenSSL urllib3 aioquic easysnmp
   - ~~SNMP w/defaults for managed switches and system performance tuning~~ (completed in v1.2.5)
   - ~~Switch port status monitoring (`ports` type) with per-interface silence windows~~ (completed in v1.2.9)
   - ~~Add automated MAC address pinning to port status monitoring~~ (completed in v1.2.10)
+  - Add individual port monitor with repeating alerts
   - Update docs to provide webhook examples for Pushover, Slack & Discord
 
 - Add additional outputs: 
   - ~~MRTG compatible logfiles~~ (completed in v1.2.3)
   - ~~MRTG compatible graph generation w/index.html~~ (completed in v1.2.3)
+  - Make index.html support multipl site files (index-<SiteName>.html)
   - Use loess regression on MRTG compatible logfiles for outlier & drop/increase detection
 
 - Aggregated root cause alerting:
@@ -1596,7 +1598,7 @@ under the [GNU General Public License version 3](LICENSE.txt).
 `mrtg-rrd.cgi.pl` is licensed by Jan "Yenya" Kasprzak <kas@fi.muni.cz><br />
 under the [GNU General Public License version 2](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
 ```
-Software: APMonitor 1.2.11
+Software: APMonitor 1.2.12
 License: GNU General Public License version 3
 Licensor: Andrew (AP) Prendergast, ap@andrewprendergast.com -- FSF Member
 ```
